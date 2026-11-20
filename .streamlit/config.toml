@@ -1,0 +1,18 @@
+# Look of the Streamlit UI: light, neutral, one dark accent. Details are in assets/style.css.
+[theme]
+base = "light"
+primaryColor = "#18181B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F6F6F4"
+textColor = "#18181B"
+borderColor = "#E7E7E4"
+font = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+baseRadius = "10px"
+buttonRadius = "999px"
+showSidebarBorder = true
+
+[theme.sidebar]
+backgroundColor = "#F6F6F4"
+
+[client]
+toolbarMode = "minimal"

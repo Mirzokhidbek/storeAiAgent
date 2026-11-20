@@ -13,7 +13,9 @@ kept in session_state. The thread_id is also in the URL (?t=...), so a page relo
 finds the same paused graph again.
 """
 
+import html
 import uuid
+from pathlib import Path
 
 import streamlit as st
 from langchain_core.callbacks import get_usage_metadata_callback
@@ -30,8 +32,12 @@ from config import MissingSettingError
 from shop import customers, orders
 
 GREETING = "Salom! Men TexnoBozor yordamchisiman. Sizga qanday yordam bera olaman?"
-STATUS_LABELS = {"yangi": "🆕 Yangi", "tolandi": "💳 To'landi", "yolda": "🚚 Yo'lda",
-                 "yetkazildi": "✅ Yetkazildi", "bekor_qilindi": "❌ Bekor qilindi"}
+STATUS_LABELS = {"yangi": "Yangi", "tolandi": "To'landi", "yolda": "Yo'lda",
+                 "yetkazildi": "Yetkazildi", "bekor_qilindi": "Bekor qilindi"}
+# Ready-made first questions shown on an empty chat (one click = one question).
+SUGGESTIONS = ["6 mln so'mgacha yengil noutbuk", "Mahsulotni qaytarsam bo'ladimi?",
+               "Yetkazib berish qancha turadi?", "1234 buyurtmam qayerda?"]
+STYLE_FILE = Path(__file__).with_name("assets") / "style.css"
 SIDEBAR_ORDERS = 10
 
 
@@ -181,9 +187,11 @@ def add_message(role: str, content: str, sources: list[str] | None = None) -> No
 # ======================= sidebar =======================
 
 def login_form() -> None:
-    with st.form("login"):
-        phone = st.text_input("Telefon raqam", placeholder="+998901234567")
-        if st.form_submit_button("Kirish"):
+    st.markdown('<div class="tb-muted">Savat va buyurtmalarni ko\'rish uchun kiring.</div>',
+                unsafe_allow_html=True)
+    with st.form("login", border=False):
+        phone = st.text_input("Telefon raqam", placeholder="+998 90 123 45 67")
+        if st.form_submit_button("Kirish", type="primary", use_container_width=True):
             customer = customers.find_by_phone(phone)
             if customer is None:
                 st.error("Bu raqam bilan mijoz topilmadi.")
@@ -192,7 +200,7 @@ def login_form() -> None:
             st.session_state.customer_name = customer["name"]
             reset_conversation()
             st.rerun()
-    st.caption("Sinov uchun: +998901234567 (Aziz Karimov)")
+    st.caption("Sinov uchun: +998901234567")
 
 
 def logout() -> None:
@@ -201,48 +209,77 @@ def logout() -> None:
     reset_conversation()
 
 
+def row(left: str, right: str, extra_class: str = "") -> str:
+    """One "name ........ value" line. Text from the DB is escaped before it goes into HTML."""
+    return (f'<div class="tb-row {extra_class}"><span>{html.escape(left)}</span>'
+            f'<span>{html.escape(right)}</span></div>')
+
+
 def show_cart(customer_id: str) -> None:
-    st.subheader("🛒 Savat")
+    st.markdown('<div class="tb-section">Savat</div>', unsafe_allow_html=True)
     cart = orders.view_cart(customer_id)   # read from the DB on every re-run: always fresh
     if not cart.get("items"):
-        st.caption("Savat bo'sh")
+        st.markdown('<div class="tb-muted">Savat bo\'sh</div>', unsafe_allow_html=True)
         return
-    for item in cart["items"]:
-        st.markdown(f"- {item['name']} — {item['quantity']} ta × {format_uzs(item['price_uzs'])}")
-    st.markdown(f"**Jami: {format_uzs(cart['total_uzs'])}**")
+    lines = [row(f"{item['name']} × {item['quantity']}", format_uzs(item["subtotal_uzs"]))
+             for item in cart["items"]]
+    lines.append(row("Jami", format_uzs(cart["total_uzs"]), "tb-total"))
+    st.markdown("".join(lines), unsafe_allow_html=True)
 
 
 def show_orders(customer_id: str) -> None:
-    st.subheader("📦 Buyurtmalarim")
+    st.markdown('<div class="tb-section">Buyurtmalar</div>', unsafe_allow_html=True)
     my_orders = orders.list_my_orders(customer_id).get("orders", [])
     if not my_orders:
-        st.caption("Buyurtmalar yo'q")
+        st.markdown('<div class="tb-muted">Hali buyurtma yo\'q</div>', unsafe_allow_html=True)
         return
-    for order in my_orders[:SIDEBAR_ORDERS]:
-        st.markdown(f"- #{order['id']} — {STATUS_LABELS.get(order['status'], order['status'])}")
+    lines = [f'<div class="tb-row"><span>#{html.escape(order["id"])}</span>'
+             f'<span class="tb-status tb-{html.escape(order["status"])}">'
+             f'{html.escape(STATUS_LABELS.get(order["status"], order["status"]))}</span></div>'
+             for order in my_orders[:SIDEBAR_ORDERS]]
+    st.markdown("".join(lines), unsafe_allow_html=True)
 
 
 def sidebar() -> None:
     with st.sidebar:
-        st.title("TexnoBozor")
+        st.markdown('<div class="tb-side-brand">TexnoBozor</div>', unsafe_allow_html=True)
         if not st.session_state.customer_id:
-            st.info("Buyurtmalar va savat uchun tizimga kiring.")
             login_form()
             return
-        st.success(f"👤 {st.session_state.customer_name}")
-        st.button("Chiqish", on_click=logout)
+        st.markdown(f'<div class="tb-muted">{html.escape(st.session_state.customer_name)}</div>',
+                    unsafe_allow_html=True)
+        st.button("Chiqish", on_click=logout, type="tertiary")
         show_cart(st.session_state.customer_id)
         show_orders(st.session_state.customer_id)
 
 
 # ======================= chat =======================
 
+def header() -> None:
+    st.markdown('<div class="tb-header"><span class="tb-brand">TexnoBozor</span>'
+                '<span class="tb-sub">elektronika do\'koni yordamchisi</span></div>',
+                unsafe_allow_html=True)
+
+
 def show_history() -> None:
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(as_markdown(message["content"]))
             if message["sources"]:
-                st.caption("Manba: " + ", ".join(message["sources"]))
+                sources = html.escape(", ".join(message["sources"]))
+                st.markdown(f'<span class="tb-source">Manba: {sources}</span>', unsafe_allow_html=True)
+
+
+def suggestions() -> None:
+    """Shown only on an empty chat, so a new customer sees what they can ask."""
+    columns = st.columns(2)
+    for i, text in enumerate(SUGGESTIONS):
+        columns[i % 2].button(text, key=f"suggest-{i}", on_click=queue_question, args=(text,),
+                              use_container_width=True)
+
+
+def queue_question(text: str) -> None:
+    st.session_state.queued_question = text
 
 
 def decide(interrupt_id: str, answer: str) -> None:
@@ -255,18 +292,31 @@ def as_markdown(text: str) -> str:
 
 
 def confirmation_box(pending) -> None:
-    with st.chat_message("assistant"):
+    with st.container(border=True):
+        st.markdown('<div class="tb-card-title">Tasdiqlaysizmi?</div>', unsafe_allow_html=True)
         st.markdown(as_markdown(pending.value["summary"]))
         left, right = st.columns(2)
         # The interrupt id travels with the click, so it answers this question only.
-        left.button("✅ Tasdiqlash", on_click=decide, args=(pending.id, APPROVE), type="primary")
-        right.button("❌ Bekor qilish", on_click=decide, args=(pending.id, REJECT))
+        left.button("✅ Tasdiqlash", on_click=decide, args=(pending.id, APPROVE), type="primary",
+                    use_container_width=True)
+        right.button("❌ Bekor qilish", on_click=decide, args=(pending.id, REJECT),
+                     use_container_width=True)
+
+
+def send(question: str) -> None:
+    add_message("user", question)
+    with st.chat_message("user"):   # show it now, not only after the answer arrives
+        st.markdown(question)
+    ask(question)
+    st.rerun()                      # redraw: new messages, fresh cart and orders in the sidebar
 
 
 def main() -> None:
-    st.set_page_config(page_title="TexnoBozor yordamchisi", page_icon="🛍️")
+    st.set_page_config(page_title="TexnoBozor", page_icon="🛍️")
+    st.markdown(f"<style>{STYLE_FILE.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
     init_session()
     sidebar()
+    header()
     show_history()
 
     ss = st.session_state
@@ -279,15 +329,17 @@ def main() -> None:
     pending = pending_confirmation(get_agent(), thread_config())
     if pending:
         confirmation_box(pending)
+    elif len(ss.messages) == 1:
+        suggestions()
+
+    if queued := ss.pop("queued_question", None):
+        send(queued)
 
     # While a confirmation is open, the customer answers with the buttons, not by typing.
-    question = st.chat_input("Savolingizni yozing...", disabled=pending is not None)
+    question = st.chat_input("Savol yozing — masalan, 6 mln gacha noutbuk",
+                             disabled=pending is not None)
     if question:
-        add_message("user", question)
-        with st.chat_message("user"):   # show it now, not only after the answer arrives
-            st.markdown(question)
-        ask(question)
-        st.rerun()             # redraw: new messages, fresh cart and orders in the sidebar
+        send(question)
 
 
 if __name__ == "__main__":   # Streamlit runs the file as __main__; tests import it safely

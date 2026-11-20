@@ -1,0 +1,56 @@
+/* TexnoBozor chat UI. Plain and quiet on purpose: no avatars, no gradients, no emoji. */
+
+/* ---------- page width and spacing ---------- */
+[data-testid="stMainBlockContainer"] { max-width: 760px; padding-top: 2.5rem; }
+[data-testid="stHeader"] { background: transparent; }
+
+/* ---------- header ---------- */
+.tb-header { display: flex; align-items: baseline; gap: .6rem; margin-bottom: 1.5rem; }
+.tb-brand { font-size: 1.35rem; font-weight: 700; letter-spacing: -.02em; }
+.tb-sub { color: #71717A; font-size: .9rem; }
+
+/* ---------- chat messages ---------- */
+[data-testid="stChatMessageAvatarUser"],
+[data-testid="stChatMessageAvatarAssistant"] { display: none; }
+[data-testid="stChatMessage"] { background: transparent; padding: .15rem 0; gap: 0; }
+[data-testid="stChatMessageContent"] { line-height: 1.6; }
+
+/* customer: a soft bubble on the right */
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) { justify-content: flex-end; }
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) [data-testid="stChatMessageContent"] {
+  flex: 0 1 auto; max-width: 80%; margin: 0 0 0 auto; background: #F1F1EE; border-radius: 18px;
+  padding: .55rem 1rem;
+}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) p { margin: 0; }
+
+/* assistant: plain text, full width */
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] {
+  padding: .25rem 0;
+}
+
+/* source line under an answer */
+.tb-source { display: inline-block; margin-top: .35rem; font-size: .78rem; color: #71717A;
+  border: 1px solid #E7E7E4; border-radius: 999px; padding: .1rem .6rem; }
+
+/* ---------- chat input ---------- */
+[data-testid="stChatInput"] { border-radius: 16px; }
+[data-testid="stBottomBlockContainer"] { max-width: 760px; }
+
+/* ---------- confirmation card ---------- */
+.tb-card-title { font-weight: 600; margin-bottom: .35rem; }
+.tb-summary { font-size: .93rem; line-height: 1.65; color: #3F3F46; }
+
+/* ---------- sidebar ---------- */
+.tb-side-brand { font-size: 1.1rem; font-weight: 700; letter-spacing: -.02em; margin-bottom: .2rem; }
+.tb-muted { color: #71717A; font-size: .85rem; margin-bottom: .6rem; }
+.tb-section { font-size: .75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+  color: #71717A; margin: 1.4rem 0 .5rem; }
+.tb-row { display: flex; justify-content: space-between; gap: .75rem; font-size: .88rem; padding: .3rem 0; }
+.tb-row span:last-child { white-space: nowrap; color: #3F3F46; }
+.tb-total { border-top: 1px solid #E7E7E4; margin-top: .3rem; padding-top: .5rem; font-weight: 600; }
+
+/* order status: a small dot + word instead of emoji */
+.tb-status { display: inline-flex; align-items: center; gap: .35rem; font-size: .8rem; color: #3F3F46; }
+.tb-status::before { content: ""; width: .45rem; height: .45rem; border-radius: 50%; background: var(--dot, #A1A1AA); }
+.tb-yangi { --dot: #2563EB; } .tb-tolandi { --dot: #0D9488; } .tb-yolda { --dot: #D97706; }
+.tb-yetkazildi { --dot: #16A34A; } .tb-bekor_qilindi { --dot: #A1A1AA; }
