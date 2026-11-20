@@ -15,4 +15,5 @@ class ShopState(TypedDict):
     context: list[dict]              # retrieved chunks / tool results
     sources: list[str]               # shown under the answer
     retries: int                     # retrieval retry counter
+    search_query: str | None         # rewritten policy question (None = use the user's words)
     pending_action: dict | None      # action awaiting confirmation

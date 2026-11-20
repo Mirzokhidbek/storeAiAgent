@@ -51,7 +51,8 @@ EMBEDDING_MODEL=...         # e.g. a current Google embedding model
 LLM_TEMPERATURE=0.2
 LLM_MAX_TOKENS=800
 RAG_TOP_K=4
-RAG_SCORE_THRESHOLD=0.75     # calibrated in Phase 2, see §6 "Threshold calibration"
+RAG_SCORE_THRESHOLD=0.75     # "confident" line, calibrated in Phase 2, see §6 "Threshold calibration"
+RAG_LOW_THRESHOLD=0.68       # "doubtful" line, chosen in Phase 4c, see §6 "Three retrieval zones"
 MAX_RETRIEVAL_RETRIES=2
 ```
 
@@ -197,6 +198,29 @@ Conclusion: `0.5` passes everything (even "Ob-havo qanday?" scores 0.646). **`RA
 
 Known limit: the gap between groups is narrow. "Rossiyaga jo'natasizmi?" passes with only 0.756, and some unanswerable questions (e.g. trade-in, 0.763) still pass. So the threshold is only the first guard. The second guard is the prompt rule "answer only from the documents, otherwise say: Bu haqda ma'lumotim yo'q". Re-calibrate if the embedding model or the documents change.
 
+### Three retrieval zones (Phase 4c)
+
+One threshold forces a hard choice: too high rejects answerable questions that are merely phrased badly, too low lets unrelated questions through. So the agent uses **two lines and three zones**, decided by the **top-1 score**:
+
+| Zone | Top-1 score | What happens |
+|---|---|---|
+| confident | ≥ `RAG_SCORE_THRESHOLD` = **0.75** | `respond` answers from chunks ≥ 0.75 and cites them |
+| doubtful | ≥ `RAG_LOW_THRESHOLD` = **0.68** | `rewrite_query` rephrases the question, then search again |
+| no answer | < 0.68 | `respond` says "Bu haqda ma'lumotim yo'q…" right away, no LLM call |
+
+Measurements behind the choice (Phase 2 table above, plus a Phase 4c re-run with vague / pronoun questions):
+
+| Group | Examples | Top-1 range |
+|---|---|---|
+| Answer exists, clear wording | "Kafolat necha oy?", "Rossiyaga jo'natasizmi?" | 0.756 – 0.899 |
+| Answer exists, vague wording | "Samarqandga olib borasizlarmi?" (0.708), "naqd berib olsam bo'ladimi?" (0.768), "uning kafolati qancha?" (0.825) | **0.708** – 0.886 |
+| No answer | "Bugun futbol kim yutdi?" (0.583), "Ob-havo qanday?" (0.646), "Sport zali uchun chegirma bormi?" (0.670), "Chegirmalar bormi?" (0.733) | 0.583 – 0.742 (outliers up to 0.772) |
+
+- **0.75 stays** as the confident line: every clearly worded answerable question passes, and `ask_policy.py` (Phase 2) keeps its behaviour.
+- **0.68** sits ~0.03 below the lowest answerable score seen (0.708), so a vaguely worded answerable question still gets a rewrite. Clearly off-topic questions (≤ 0.672) stop immediately and cost nothing extra.
+- Unanswerable questions in 0.68–0.75 (e.g. discounts, repairs) cost up to `MAX_RETRIEVAL_RETRIES` rewrites, then go to `handoff` — acceptable, a human can answer them.
+- "no answer" applies only to the **user's own words**. If a *rewrite* lands below 0.68, the rewrite drifted off-topic; that is counted as one more failed attempt, not as proof the documents have no answer.
+
 ### Sources are added by code, not by the LLM
 
 The "Manba: ..." line is built by code from the `source` metadata of the chunks that passed the threshold. The LLM is told **not** to write sources itself. Why: a source written by the LLM can be invented or wrong, while metadata cannot. If no chunk passes, or the LLM answers with the "ma'lumotim yo'q" sentence, no source is shown.
@@ -247,6 +271,7 @@ class ShopState(TypedDict):
     context: list[dict]                       # retrieved chunks / tool results
     sources: list[str]                        # shown under the answer
     retries: int                              # retrieval retry counter
+    search_query: str | None                  # rewritten policy question (None = user's own words)
     pending_action: dict | None               # action awaiting confirmation
 ```
 
@@ -256,12 +281,12 @@ class ShopState(TypedDict):
 |---|---|
 | `router` | LLM classifies the latest user message into one `intent` (structured output). Must understand indirect phrasing ("noutbugim keldimi?" → `order`). |
 | `product_search` | Calls catalog tools (LLM with catalog tools bound; may call several). |
-| `policy_rag` | Calls `search_policies`. If no chunk passes the threshold → go to `rewrite_query`. |
-| `rewrite_query` | LLM rewrites the question for better retrieval; `retries += 1`. If `retries > MAX_RETRIEVAL_RETRIES` → `handoff`. |
+| `policy_rag` | Calls `search_policies` with `search_query` (or the user's question) and records the zone (§6 "Three retrieval zones"). |
+| `rewrite_query` | LLM rewrites the question using recent chat history ("uning kafolati" → "Lenovo IdeaPad noutbukining kafolati") and the queries already tried; sets `search_query`, `retries += 1`. |
 | `order_support` | Calls read-only order tools. |
 | `confirm_action` | Builds `pending_action` (e.g. order summary with total) and calls `interrupt()` to pause the graph until the UI resumes it with `approve` / `reject`. |
 | `execute_action` | Runs `place_order` / `cancel_order` only if approved. |
-| `handoff` | Polite message that an operator will contact the customer. |
+| `handoff` | Fixed polite message that an operator will contact the customer (no LLM call). |
 | `respond` | Writes the final Uzbek answer from `context`, appends sources. |
 
 ### Edges
@@ -269,15 +294,17 @@ class ShopState(TypedDict):
 ```
 START → router
 router → product_search | policy_rag | order_support | confirm_action | respond (chitchat) | handoff
-policy_rag → respond            (if relevant chunks found)
-policy_rag → rewrite_query      (if not)
-rewrite_query → policy_rag | handoff
+policy_rag → respond            (confident; or no answer on the user's own words)
+policy_rag → rewrite_query      (doubtful, or a drifted rewrite, and retries < MAX_RETRIEVAL_RETRIES)
+policy_rag → handoff            (same, but retries == MAX_RETRIEVAL_RETRIES)
+rewrite_query → policy_rag
 confirm_action → execute_action → respond
-product_search, order_support, handoff → respond
+product_search, order_support → respond
+handoff → END                   (fixed message; going through respond would add an LLM call for nothing)
 respond → END
 ```
 
-**Phase 4 note (borderline retrieval):** the 0.75 threshold sits close to some answerable questions (e.g. "Rossiyaga jo'natasizmi?" = 0.756). A question whose chunks fail the threshold must **not** be rejected immediately with "ma'lumotim yo'q". It must go to `rewrite_query` first (rephrased, e.g. "Rossiya" → "xalqaro yetkazib berish"), and only after `MAX_RETRIEVAL_RETRIES` failed attempts go to `handoff`.
+**Phase 4 note (borderline retrieval):** implemented in Phase 4c as three zones, see §6 "Three retrieval zones". Original note: the 0.75 threshold sits close to some answerable questions (e.g. "Rossiyaga jo'natasizmi?" = 0.756). A question whose chunks fail the threshold must **not** be rejected immediately with "ma'lumotim yo'q". It must go to `rewrite_query` first (rephrased, e.g. "Rossiya" → "xalqaro yetkazib berish"), and only after `MAX_RETRIEVAL_RETRIES` failed attempts go to `handoff`.
 
 Messages mixing intents (e.g. product + policy): v1 handles the primary intent; v2 (optional, after Phase 7) lets a ReAct-style node call tools from several groups.
 

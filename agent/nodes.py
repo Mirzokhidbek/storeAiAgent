@@ -8,9 +8,11 @@ from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage, Syste
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 
+import config
 from agent.llm import get_chat_model
-from agent.prompts import (CHITCHAT_PROMPT, NO_INFO, NOT_READY, ORDER_SUPPORT_PROMPT,
-                           PRODUCT_SEARCH_PROMPT, RESPOND_PROMPT, ROUTER_PROMPT)
+from agent.prompts import (CHITCHAT_PROMPT, HANDOFF_MESSAGE, NO_INFO, NOT_READY,
+                           ORDER_SUPPORT_PROMPT, PRODUCT_SEARCH_PROMPT, RESPOND_PROMPT,
+                           REWRITE_PROMPT, ROUTER_PROMPT)
 from agent.state import Intent, ShopState
 from agent.tools import CATALOG_TOOLS, ORDER_READ_TOOLS
 from rag.retriever import search_policies
@@ -52,6 +54,12 @@ def _respond_llm():
 
 
 @lru_cache
+def _rewrite_llm():
+    # temperature=0: a rewrite should be a faithful rephrasing, not a creative one.
+    return get_chat_model(temperature=0, thinking_level="low")
+
+
+@lru_cache
 def _tool_llm(group: str):
     # Picking tools is a simple task, so low thinking is enough.
     return get_chat_model(thinking_level="low").bind_tools(TOOL_GROUPS[group])
@@ -72,7 +80,8 @@ def router(state: ShopState) -> dict:
     history = recent_messages(state["messages"], ROUTER_HISTORY)
     decision: RouteDecision = _router_llm().invoke([SystemMessage(ROUTER_PROMPT), *history])
     # A new question starts with a clean per-turn scratchpad.
-    return {"intent": decision.intent, "context": [], "sources": [], "retries": 0}
+    return {"intent": decision.intent, "context": [], "sources": [], "retries": 0,
+            "search_query": None}
 
 
 def chitchat(state: ShopState) -> dict:
@@ -122,12 +131,63 @@ def order_support(state: ShopState, config: RunnableConfig) -> dict:
     return {"context": run_tool_loop(state, config, "order", ORDER_SUPPORT_PROMPT)}
 
 
+def retrieval_zone(top_score: float) -> str:
+    """Three zones by the best chunk's score. Thresholds are calibrated in SPEC.md §6."""
+    if top_score >= config.RAG_SCORE_THRESHOLD:
+        return "confident"
+    if top_score >= config.RAG_LOW_THRESHOLD:
+        return "doubtful"
+    return "no_answer"
+
+
 def policy_rag(state: ShopState) -> dict:
-    """Retrieval step of RAG. Only chunks above the score threshold come back."""
-    query = _last_question(state)
-    chunks = search_policies(query)
-    # Phase 4c: an empty result will go to rewrite_query instead of straight to respond.
-    return {"context": [{"tool": "search_policies", "args": {"query": query}, "result": chunks}]}
+    """Retrieval step of RAG: search, then decide which zone the result falls into."""
+    query = state.get("search_query") or _last_question(state)
+    # Ask for everything above the LOW line, so we can see "doubtful" scores too.
+    chunks = search_policies(query, threshold=config.RAG_LOW_THRESHOLD)
+    top_score = max((c["score"] for c in chunks), default=0.0)
+    attempt = {
+        "tool": "search_policies",
+        "args": {"query": query},
+        # Only confident chunks may be used for the answer (and as sources).
+        "result": [c for c in chunks if c["score"] >= config.RAG_SCORE_THRESHOLD],
+        "zone": retrieval_zone(top_score),
+        "top_score": top_score,
+    }
+    # Keep earlier attempts too: the terminal shows the whole retry history.
+    return {"context": [*state.get("context", []), attempt]}
+
+
+def route_after_policy(state: ShopState) -> str:
+    """Where to go after a search. This is also where the retry loop stops."""
+    zone = state["context"][-1]["zone"]
+    retries = state.get("retries", 0)
+    if zone == "confident":
+        return "respond"
+    if zone == "no_answer" and retries == 0:
+        return "respond"   # the user's own words are far from every document: "ma'lumotim yo'q"
+    # Doubtful, or a rewrite that drifted off-topic. A bad rewrite does not prove the
+    # documents have no answer, so it counts as one more failed attempt.
+    if retries < config.MAX_RETRIEVAL_RETRIES:
+        return "rewrite_query"
+    return "handoff"       # rewrote MAX times and still unsure: a human should answer
+
+
+def rewrite_query(state: ShopState) -> dict:
+    """Rephrase the question for a better search, using the chat history."""
+    tried = [item["args"]["query"] for item in state["context"]
+             if item["tool"] == "search_policies"]
+    system = SystemMessage(REWRITE_PROMPT + "\n\nOldin sinalgan so'rovlar:\n"
+                           + "\n".join(f"- {q}" for q in tried))
+    history = recent_messages(state["messages"], ROUTER_HISTORY)
+    reply = _rewrite_llm().invoke([system, *history]).text.strip()
+    new_query = reply.splitlines()[0].strip(' "\'') if reply else tried[-1]
+    return {"search_query": new_query, "retries": state.get("retries", 0) + 1}
+
+
+def handoff(state: ShopState) -> dict:
+    """Polite fixed message. Fixed text on purpose: nothing for the LLM to get wrong."""
+    return {"messages": [AIMessage(HANDOFF_MESSAGE)], "sources": []}
 
 
 def _policy_chunks(context: list[dict]) -> list[dict]:
@@ -138,7 +198,8 @@ def format_context(context: list[dict]) -> str:
     """Delimiters mark where trusted instructions end and plain data begins (SPEC §12)."""
     parts = [f'<natija tool="{item["tool"]}">\n'
              f'{json.dumps(item["result"], ensure_ascii=False, indent=1)}\n</natija>'
-             for item in context]
+             for item in context
+             if item["result"] != []]   # failed search attempts add nothing useful
     return "<malumotlar>\n" + "\n".join(parts) + "\n</malumotlar>"
 
 

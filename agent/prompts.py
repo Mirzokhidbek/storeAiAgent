@@ -72,4 +72,18 @@ Yordamchi: Ha, ishlatilmagan mahsulotni original qutisida yetkazilganidan keyin 
 Mijoz: Sport zali uchun chegirma bormi?
 Yordamchi: {NO_INFO}"""
 
+# Used by rewrite_query when a policy search was "doubtful" (see SPEC §6, three zones).
+REWRITE_PROMPT = """Sen qidiruv so'rovini yaxshilovchisan. Mijozning oxirgi savoli do'kon qoidalari
+hujjatlarida (qaytarish, kafolat, yetkazib berish, to'lov, FAQ) yaxshi topilmadi.
+Savolni hujjatlardan qidirish uchun qayta yoz:
+- olmoshlarni ("uning", "shu", "u") suhbat tarixidagi aniq nom bilan almashtir
+  (masalan "uning kafolati" -> "Lenovo IdeaPad noutbukining kafolati")
+- shahar yoki davlat nomini umumiy tushuncha bilan ayt
+  (masalan "Samarqandga" -> "viloyatlarga yetkazib berish", "Rossiyaga" -> "xalqaro yetkazib berish")
+- qisqa va aniq bitta savol bo'lsin, oldin sinalgan so'rovlardan farq qilsin
+Faqat qayta yozilgan savolni qaytar, boshqa hech narsa yozma."""
+
+HANDOFF_MESSAGE = ("Bu savol bo'yicha sizni operatorimizga ulayman. "
+                   "Tez orada operator siz bilan bog'lanadi. Sabringiz uchun rahmat!")
+
 NOT_READY ="Kechirasiz, bu qism hali tayyor emas. Tez orada ishga tushadi!"

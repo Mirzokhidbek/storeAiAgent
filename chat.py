@@ -16,12 +16,21 @@ TEST_CUSTOMER_ID = "C-001"
 
 def print_debug(state: dict, usage_by_model: dict) -> None:
     """Shown for learning: what the graph did behind the answer."""
-    tools = [f"{c['tool']}({format_args(c['args'])})" for c in state.get("context") or []]
+    tools = [describe_call(c) for c in state.get("context") or []]
     print(f"   [intent: {state['intent']}]")
     print(f"   [tool'lar: {', '.join(tools) or "yo'q"}]")
+    if state.get("retries"):
+        print(f"   [qayta yozishlar: {state['retries']}]")
     tokens_in = sum(u.get("input_tokens", 0) for u in usage_by_model.values())
     tokens_out = sum(u.get("output_tokens", 0) for u in usage_by_model.values())
     print(f"   [tokenlar: kirish {tokens_in}, chiqish {tokens_out}, jami {tokens_in + tokens_out}]")
+
+
+def describe_call(call: dict) -> str:
+    text = f"{call['tool']}({format_args(call['args'])})"
+    if "zone" in call:   # policy search: show its score and zone, to see the retry loop
+        text += f" -> {call['top_score']:.3f} {call['zone']}"
+    return text
 
 
 def format_args(args: dict) -> str:

@@ -1,8 +1,11 @@
 """Builds the LangGraph agent.
 
-    START -> router -> product_search | policy_rag | order_support -> respond -> END
+    START -> router -> product_search | order_support -> respond -> END
+                    -> policy_rag -> respond | rewrite_query | handoff
+                         rewrite_query -> policy_rag            (the retry loop)
                     -> chitchat -> END
-                    -> confirm_action | handoff (stubs until Phase 4c) -> END
+                    -> handoff -> END
+                    -> confirm_action (stub until a later phase) -> END
 
 Data-collecting nodes only fill state["context"]; `respond` writes the one final answer.
 """
@@ -26,9 +29,8 @@ INTENT_TO_NODE = {
     "handoff": "handoff",
 }
 # These nodes collect data, then hand over to `respond` for the final answer.
-DATA_NODES = {"product_search": nodes.product_search, "policy_rag": nodes.policy_rag,
-              "order_support": nodes.order_support}
-STUB_NODES = ["confirm_action", "handoff"]
+DATA_NODES = {"product_search": nodes.product_search, "order_support": nodes.order_support}
+STUB_NODES = ["confirm_action"]
 
 
 def route_by_intent(state: ShopState) -> str:
@@ -40,6 +42,9 @@ def build_graph():
     graph.add_node("router", nodes.router)
     graph.add_node("chitchat", nodes.chitchat)
     graph.add_node("respond", nodes.respond)
+    graph.add_node("policy_rag", nodes.policy_rag)
+    graph.add_node("rewrite_query", nodes.rewrite_query)
+    graph.add_node("handoff", nodes.handoff)
     for name, node in DATA_NODES.items():
         graph.add_node(name, node)
     for name in STUB_NODES:
@@ -48,8 +53,13 @@ def build_graph():
     graph.add_edge(START, "router")
     graph.add_conditional_edges("router", route_by_intent, list(INTENT_TO_NODE.values()))
     for name in DATA_NODES:
-        graph.add_edge(name, "respond")   # Phase 4c: policy_rag gets a rewrite_query branch
-    for name in ["chitchat", "respond", *STUB_NODES]:
+        graph.add_edge(name, "respond")
+    # Policy retry loop: policy_rag -> rewrite_query -> policy_rag ... until confident,
+    # clearly unanswerable, or MAX_RETRIEVAL_RETRIES rewrites (then handoff).
+    graph.add_conditional_edges("policy_rag", nodes.route_after_policy,
+                                ["respond", "rewrite_query", "handoff"])
+    graph.add_edge("rewrite_query", "policy_rag")
+    for name in ["chitchat", "respond", "handoff", *STUB_NODES]:
         graph.add_edge(name, END)
 
     # The checkpointer saves the state after every step, keyed by thread_id.
