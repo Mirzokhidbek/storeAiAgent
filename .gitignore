@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Generated data
+data/shop.db
+chroma_db/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/

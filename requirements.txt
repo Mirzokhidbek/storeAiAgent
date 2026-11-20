@@ -1,0 +1,11 @@
+# Pinned versions, tested on Python 3.12
+
+# Phase 0: LLM
+langchain-core==1.8.4
+langchain-google-genai==4.5.2
+python-dotenv==1.2.4
+
+# Phase 2: RAG
+chromadb==1.5.9
+langchain-chroma==1.1.0
+langchain-text-splitters==1.1.3
