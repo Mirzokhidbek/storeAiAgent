@@ -24,10 +24,14 @@ RAG_LOW_THRESHOLD = float(os.getenv("RAG_LOW_THRESHOLD", "0.68"))
 MAX_RETRIEVAL_RETRIES = int(os.getenv("MAX_RETRIEVAL_RETRIES", "2"))
 
 
+class MissingSettingError(RuntimeError):
+    """A required .env value is empty. Its own type, so the UI can show a clear message."""
+
+
 def require(name: str) -> str:
     """Return a required setting or raise a readable error. Never prints the value."""
     value = os.getenv(name, "").strip()
     if not value:
         # Fail early with a clear message instead of a confusing API error later.
-        raise RuntimeError(f"{name} .env faylida ko'rsatilmagan. .env.example'ga qarang.")
+        raise MissingSettingError(f"{name} .env faylida ko'rsatilmagan. .env.example'ga qarang.")
     return value
