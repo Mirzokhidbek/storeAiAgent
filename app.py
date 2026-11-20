@@ -1,4 +1,4 @@
-"""Phase 5: Streamlit chat UI for the TexnoBozor assistant (SPEC §10).
+"""Streamlit chat UI for the TexnoBozor assistant (SPEC §10).
 
 Run:  streamlit run app.py
 
@@ -6,6 +6,11 @@ How Streamlit works (important for reading this file): every click or message re
 this WHOLE script from top to bottom. Normal variables are lost on each re-run, so
 everything that must survive (who is logged in, the chat, the conversation thread)
 lives in st.session_state.
+
+Confirmation (Phase 6a): the graph pauses itself with interrupt(). Whether a
+confirmation is waiting is read from the graph's checkpointer on every re-run, not
+kept in session_state. The thread_id is also in the URL (?t=...), so a page reload
+finds the same paused graph again.
 """
 
 import uuid
@@ -16,9 +21,10 @@ from langchain_core.exceptions import (ModelAuthenticationError, ModelConnection
                                        ModelError, ModelPermissionDeniedError,
                                        ModelRateLimitError, ModelTimeoutError)
 from langchain_core.messages import HumanMessage
+from langgraph.types import Command
 
-from agent.graph import build_graph, run_config
-from agent.nodes import format_uzs
+from agent.graph import build_graph, pending_confirmation, run_config
+from agent.nodes import APPROVE, REJECT, format_uzs
 from config import MissingSettingError
 from shop import customers, orders
 
@@ -35,30 +41,6 @@ def get_agent():
     """Built once per server, not on every re-run. Its MemorySaver keeps every
     conversation; thread_id keeps different browser sessions apart."""
     return build_graph()
-
-
-class ConfirmationNeeded(Exception):
-    """Raised inside confirm_action to pause the graph until a button is clicked.
-
-    The graph's checkpointer has saved every step before confirm_action, so after the
-    click we resume the same thread and confirm_action runs again, this time with an
-    answer. Phase 6 replaces this hand-made pause with LangGraph's interrupt().
-    """
-
-    def __init__(self, summary: str):
-        super().__init__(summary)
-        self.summary = summary
-
-
-def make_confirm(decision: bool | None, shown_summary: str | None):
-    """The `confirm` function the graph calls before place_order / cancel_order."""
-    def confirm(summary: str) -> bool:
-        # A click answers only the exact summary the customer saw. If the cart changed
-        # meanwhile, the summary differs and the customer is asked again.
-        if decision is not None and summary == shown_summary:
-            return decision
-        raise ConfirmationNeeded(summary)
-    return confirm
 
 
 def friendly_error(err: Exception) -> str:
@@ -91,56 +73,101 @@ def log_turn(state: dict, usage: dict) -> None:
     print(f"[app] intent={state.get('intent')} tools={tools} tokens={tokens}", flush=True)
 
 
-def run_agent(question: str | None) -> None:
-    """Send a new question, or (question=None) resume a paused confirmation."""
-    ss = st.session_state
-    confirm = make_confirm(ss.decision, ss.pending_summary)
-    config = run_config(ss.thread_id, confirm=confirm)
-    # customer_id comes from the login, never from the LLM.
-    payload = (None if question is None
-               else {"messages": [HumanMessage(question)], "customer_id": ss.customer_id})
-    ss.pending_summary, ss.decision = None, None
+def thread_config() -> dict:
+    return run_config(st.session_state.thread_id)
 
+
+def run_graph(payload) -> None:
+    """Run the graph: a new question (dict) or a resume after a click (Command)."""
     try:
         with st.spinner("O'ylayapman..."), get_usage_metadata_callback() as usage:
-            state = get_agent().invoke(payload, config)
-    except ConfirmationNeeded as pause:
-        ss.pending_summary = pause.summary   # show the buttons on the next re-run
-        return
+            state = get_agent().invoke(payload, thread_config())
     except Exception as err:   # noqa: BLE001 — any failure becomes a friendly message
         print(f"[app] error: {type(err).__name__}: {str(err)[:200]}", flush=True)
         add_message("assistant", friendly_error(err))
         return
 
     log_turn(state, usage.usage_metadata)
+    if pending_confirmation(get_agent(), thread_config()):
+        return   # paused by interrupt(): main() draws the buttons from the checkpointer
     sources = state.get("sources") or []
     add_message("assistant", split_sources(state["messages"][-1].content, sources), sources)
 
 
+def ask(question: str) -> None:
+    # customer_id comes from the login, never from the LLM.
+    run_graph({"messages": [HumanMessage(question)],
+               "customer_id": st.session_state.customer_id})
+
+
+def resume(decision: dict) -> None:
+    """Continue the paused graph with the customer's answer, at most once.
+
+    The click is accepted only if THAT interrupt is still open. A double click, a second
+    tab or a stale button after a reload finds no matching interrupt and does nothing.
+    """
+    pending = pending_confirmation(get_agent(), thread_config())
+    if pending is None or pending.id != decision["id"]:
+        return
+    add_message("assistant", pending.value["summary"])   # keep what was answered in the chat
+    add_message("user", "✅ Tasdiqlash" if decision["answer"] == APPROVE else "❌ Bekor qilish")
+    # {interrupt id: answer}: the answer goes to exactly the interrupt the customer saw.
+    run_graph(Command(resume={pending.id: decision["answer"]}))
+
+
 # ======================= session state =======================
 
+def greeting() -> list[dict]:
+    return [{"role": "assistant", "content": GREETING, "sources": []}]
+
+
 def init_session() -> None:
-    """Runs on every re-run, but setdefault only fills keys that do not exist yet."""
+    """First run of a browser session: restore the thread from the URL, or start a new one."""
     ss = st.session_state
-    ss.setdefault("thread_id", uuid.uuid4().hex)
-    ss.setdefault("customer_id", None)
-    ss.setdefault("customer_name", None)
-    ss.setdefault("messages", [{"role": "assistant", "content": GREETING, "sources": []}])
-    ss.setdefault("pending_summary", None)   # order summary waiting for a button click
-    ss.setdefault("decision", None)          # True / False after the click
+    if "thread_id" in ss:
+        return
+    ss.customer_id, ss.customer_name, ss.decision = None, None, None
+    ss.messages = greeting()
+    saved = st.query_params.get("t")
+    if not (saved and restore_thread(saved)):
+        start_thread()
+
+
+def start_thread() -> None:
+    st.session_state.thread_id = uuid.uuid4().hex
+    st.query_params["t"] = st.session_state.thread_id   # survives a page reload
+
+
+def restore_thread(thread_id: str) -> bool:
+    """After a reload: who was logged in and the chat come back from the checkpointer."""
+    values = get_agent().get_state(run_config(thread_id)).values
+    if not values:
+        return False      # unknown or deleted thread (e.g. after logout)
+    ss = st.session_state
+    ss.thread_id = thread_id
+    customer = customers.find_by_id(values["customer_id"]) if values.get("customer_id") else None
+    if customer:
+        ss.customer_id, ss.customer_name = customer["id"], customer["name"]
+    ss.messages += [to_display(m) for m in values.get("messages", [])]
+    return True
+
+
+def to_display(message) -> dict:
+    if message.type == "human":
+        return {"role": "user", "content": message.content, "sources": []}
+    text, _, sources = message.content.partition("\n\nManba: ")
+    return {"role": "assistant", "content": text, "sources": sources.split(", ") if sources else []}
 
 
 def reset_conversation() -> None:
     """Called on login and logout. The next customer must not inherit anything:
     a new thread_id gives the LLM an empty memory, and the old thread is deleted
-    from the checkpointer, so the previous chat is gone from the server too."""
+    from the checkpointer (with any paused confirmation in it)."""
     ss = st.session_state
-    old_thread = ss.get("thread_id")
-    if old_thread:
-        get_agent().checkpointer.delete_thread(old_thread)
-    ss.thread_id = uuid.uuid4().hex
-    ss.messages = [{"role": "assistant", "content": GREETING, "sources": []}]
-    ss.pending_summary, ss.decision = None, None
+    get_agent().checkpointer.delete_thread(ss.thread_id)
+    start_thread()
+    ss.messages = greeting()
+    ss.decision = None
 
 
 def add_message(role: str, content: str, sources: list[str] | None = None) -> None:
@@ -209,29 +236,27 @@ def sidebar() -> None:
 def show_history() -> None:
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            st.markdown(as_markdown(message["content"]))
             if message["sources"]:
                 st.caption("Manba: " + ", ".join(message["sources"]))
 
 
-def decide(approved: bool) -> None:
-    """Button callback. Runs BEFORE the re-run, so the choice is ready when the script starts."""
-    ss = st.session_state
-    add_message("assistant", as_markdown(ss.pending_summary))   # keep what was approved in the chat
-    add_message("user", "✅ Tasdiqlash" if approved else "❌ Bekor qilish")
-    ss.decision = approved
+def decide(interrupt_id: str, answer: str) -> None:
+    """Button callback. Runs BEFORE the re-run, so the choice is ready when main() starts."""
+    st.session_state.decision = {"id": interrupt_id, "answer": answer}
 
 
 def as_markdown(text: str) -> str:
     return text.replace("\n", "  \n")   # two spaces = line break in Markdown
 
 
-def confirmation_box() -> None:
+def confirmation_box(pending) -> None:
     with st.chat_message("assistant"):
-        st.markdown(as_markdown(st.session_state.pending_summary))
+        st.markdown(as_markdown(pending.value["summary"]))
         left, right = st.columns(2)
-        left.button("✅ Tasdiqlash", on_click=decide, args=(True,), type="primary")
-        right.button("❌ Bekor qilish", on_click=decide, args=(False,))
+        # The interrupt id travels with the click, so it answers this question only.
+        left.button("✅ Tasdiqlash", on_click=decide, args=(pending.id, APPROVE), type="primary")
+        right.button("❌ Bekor qilish", on_click=decide, args=(pending.id, REJECT))
 
 
 def main() -> None:
@@ -241,19 +266,23 @@ def main() -> None:
     show_history()
 
     ss = st.session_state
-    if ss.pending_summary and ss.decision is not None:
-        run_agent(None)        # a button was clicked: resume the paused graph
+    if ss.decision:
+        decision, ss.decision = ss.decision, None   # use a click once
+        resume(decision)
         st.rerun()
-    if ss.pending_summary:
-        confirmation_box()
+
+    # Source of truth: the checkpointer. A reload or re-run sees the same pause.
+    pending = pending_confirmation(get_agent(), thread_config())
+    if pending:
+        confirmation_box(pending)
 
     # While a confirmation is open, the customer answers with the buttons, not by typing.
-    question = st.chat_input("Savolingizni yozing...", disabled=bool(ss.pending_summary))
+    question = st.chat_input("Savolingizni yozing...", disabled=pending is not None)
     if question:
         add_message("user", question)
         with st.chat_message("user"):   # show it now, not only after the answer arrives
             st.markdown(question)
-        run_agent(question)
+        ask(question)
         st.rerun()             # redraw: new messages, fresh cart and orders in the sidebar
 
 

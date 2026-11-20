@@ -284,8 +284,9 @@ class ShopState(TypedDict):
 | `policy_rag` | Calls `search_policies` with `search_query` (or the user's question) and records the zone (§6 "Three retrieval zones"). |
 | `rewrite_query` | LLM rewrites the question using recent chat history ("uning kafolati" → "Lenovo IdeaPad noutbukining kafolati") and the queries already tried; sets `search_query`, `retries += 1`. |
 | `order_support` | Calls read-only order tools. |
-| `confirm_action` | Builds `pending_action` (e.g. order summary with total) and calls `interrupt()` to pause the graph until the UI resumes it with `approve` / `reject`. |
-| `execute_action` | Runs `place_order` / `cancel_order` only if approved. |
+| `prepare_action` | LLM picks the action (structured output, no `customer_id`); read-only check (`order_summary` / `cancel_preview`); builds `pending_action` with the summary (items, prices, delivery, total). Errors → `respond` without asking. `add_to_cart` → `execute_action` directly. |
+| `confirm_action` | Only calls `interrupt({"action", "summary"})` to pause the graph until the UI resumes it with `Command(resume="approve" \| "reject")`. Anything other than `"approve"` counts as reject. |
+| `execute_action` | Runs `place_order` / `cancel_order` only if approved; refuses if the cart changed since the summary. Reject and success end with a **fixed text built by code** (no LLM); errors go to `respond`. |
 | `handoff` | Fixed polite message that an operator will contact the customer (no LLM call). |
 | `respond` | Writes the final Uzbek answer from `context`, appends sources. |
 
@@ -293,12 +294,14 @@ class ShopState(TypedDict):
 
 ```
 START → router
-router → product_search | policy_rag | order_support | confirm_action | respond (chitchat) | handoff
+router → product_search | policy_rag | order_support | prepare_action | respond (chitchat) | handoff
 policy_rag → respond            (confident; or no answer on the user's own words)
 policy_rag → rewrite_query      (doubtful, or a drifted rewrite, and retries < MAX_RETRIEVAL_RETRIES)
 policy_rag → handoff            (same, but retries == MAX_RETRIEVAL_RETRIES)
 rewrite_query → policy_rag
-confirm_action → execute_action → respond
+prepare_action → confirm_action (interrupt) | execute_action (add_to_cart) | respond (error)
+confirm_action → execute_action
+execute_action → END (reject / success: fixed text) | respond (error, add_to_cart)
 product_search, order_support → respond
 handoff → END                   (fixed message; going through respond would add an LLM call for nothing)
 respond → END
@@ -311,6 +314,8 @@ Messages mixing intents (e.g. product + policy): v1 handles the primary intent; 
 ### Memory
 - Use a LangGraph checkpointer (`MemorySaver` in v1). `thread_id` = Streamlit session id.
 - `interrupt()` requires a checkpointer — resume with the same `thread_id`.
+- On resume, the interrupted node runs again **from its first line**. So `confirm_action` contains nothing before `interrupt()`: the LLM call and the checks live in `prepare_action`, otherwise they would run twice and the LLM could choose a different action than the one approved.
+- Why the success message is fixed text: the approval happens outside the chat history, and with prompt rule 3 the LLM asked "tasdiqlaysizmi?" again after the order already existed (seen live in Phase 6a).
 
 ### Safety limits
 - Set a LangGraph recursion limit.
@@ -356,6 +361,10 @@ Rule 7 changed in Phase 2: the `respond` node appends "Manba: ..." from chunk me
 - Chat history with `st.chat_message`, input with `st.chat_input`.
 - Show sources under assistant messages (small caption).
 - When the graph is interrupted for confirmation: show a box with the action summary and two buttons, **"✅ Tasdiqlash"** and **"❌ Bekor qilish"**; resume the graph with the choice.
+  - Whether a confirmation is waiting is read from the **checkpointer** (`graph.get_state(config).interrupts`) on every rerun, not stored in `st.session_state`.
+  - The `thread_id` is kept in the URL (`?t=<thread_id>`). After a page reload the app restores the thread: customer, chat and the waiting confirmation come back. Logout deletes the thread, so an old URL restores nothing.
+  - A click carries the interrupt id and resumes with `Command(resume={interrupt_id: answer})` only if that interrupt is still open. A double click, a second tab or a stale button does nothing: the action runs at most once.
+  - The chat input is disabled while a confirmation is open.
 - Friendly error message on API/rate-limit errors (Gemini free tier has limits).
 - Initial greeting: "Salom! Men TexnoBozor yordamchisiman. Sizga qanday yordam bera olaman?"
 
@@ -472,7 +481,9 @@ Do one phase at a time. Each ends with its acceptance checks and an Uzbek summar
 - ✅ Login, chat, sources, cart and orders in sidebar all work in the browser.
 
 ### Phase 6 — Human-in-the-loop & MCP
-- Replace terminal confirmation with `interrupt()` + Streamlit buttons.
+Done in two parts: **6a** = `interrupt()` confirmation, **6b** = MCP servers.
+- 6a: Replace terminal confirmation with `interrupt()` + Streamlit buttons (terminal `chat.py` resumes with `Command` too).
+- 6a ✅ tests: DB unchanged while paused; approve creates the order; reject changes nothing; a page reload keeps the waiting confirmation and never runs it twice.
 - Move tools to MCP servers (§11); agent uses them through `langchain-mcp-adapters`.
 - ✅ An order is created only after "Tasdiqlash" is clicked; "Bekor qilish" leaves DB unchanged.
 - ✅ Same eval results as before the MCP migration.

@@ -3,8 +3,8 @@
 "TexnoBozor" (o'ylab topilgan elektronika do'koni) uchun AI chat-yordamchi.
 O'quv loyihasi: Gemini, LangChain, LangGraph, RAG (Chroma), SQLite, MCP, Streamlit.
 
-**Holati: Phase 5 of 7** — terminal agenti va Streamlit interfeysi tayyor.
-Keyingisi: 6-bosqich (`interrupt()` bilan tasdiqlash va MCP serverlar).
+**Holati: Phase 6a of 7** — terminal agenti, Streamlit interfeysi va `interrupt()` bilan tasdiqlash tayyor.
+Keyingisi: 6b (MCP serverlar).
 
 To'liq texnik topshiriq: [SPEC.md](SPEC.md).
 

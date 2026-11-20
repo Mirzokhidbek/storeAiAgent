@@ -7,6 +7,7 @@ from typing import Literal
 from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage, SystemMessage,
                                      ToolMessage, trim_messages)
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 import config
@@ -253,7 +254,7 @@ def respond(state: ShopState) -> dict:
     return {"messages": [AIMessage(reply)], "sources": sources}
 
 
-# ======================= actions: confirm_action -> execute_action =======================
+# ============ actions: prepare_action -> confirm_action -> execute_action ============
 
 def format_uzs(amount: int) -> str:
     """4500000 -> "4 500 000 so'm" (SPEC §9, rule 6)."""
@@ -284,16 +285,18 @@ def cancel_order_text(order: dict) -> str:
     return "\n".join(lines)
 
 
-def ask_customer(config: RunnableConfig, text: str) -> bool:
-    """Ask the customer to approve. Phase 4: the app passes a `confirm` function in the
-    config (the terminal asks y/n). Phase 6 replaces this with LangGraph interrupt().
-    No confirm function = nobody can say "yes" = the action is NOT done."""
-    confirm = (config or {}).get("configurable", {}).get("confirm")
-    return bool(confirm and confirm(text))
+# What the UI / terminal sends back to resume the graph. Anything else counts as "no".
+APPROVE, REJECT = "approve", "reject"
 
 
-def confirm_action(state: ShopState, config: RunnableConfig) -> dict:
-    """Decide which action, check it can be done, show a summary, ask for approval."""
+def prepare_action(state: ShopState) -> dict:
+    """Decide which action, check it can be done and build the summary to show.
+
+    Kept apart from confirm_action on purpose: when a paused graph is resumed, the
+    interrupted node starts again FROM ITS FIRST LINE. If this LLM call lived in
+    confirm_action, it would run a second time after the click and could pick a
+    different action than the one the customer approved.
+    """
     history = recent_messages(state["messages"], ROUTER_HISTORY)
     request: ActionRequest = _action_llm().invoke([SystemMessage(ACTION_PROMPT), *history])
     customer_id = state.get("customer_id")
@@ -318,11 +321,29 @@ def confirm_action(state: ShopState, config: RunnableConfig) -> dict:
 
     text = place_order_text(check) if request.action == "place_order" else cancel_order_text(check)
     return {"pending_action": {"action": request.action, "args": args, "summary": text,
-                               "snapshot": check, "approved": ask_customer(config, text)}}
+                               "snapshot": check, "approved": False}}
 
 
-def route_after_confirm(state: ShopState) -> str:
-    return "execute_action" if state.get("pending_action") else "respond"
+def route_after_prepare(state: ShopState) -> str:
+    pending = state.get("pending_action")
+    if not pending:
+        return "respond"            # nothing to do: respond explains the error
+    if pending["approved"]:
+        return "execute_action"     # add_to_cart: no question needed
+    return "confirm_action"
+
+
+def confirm_action(state: ShopState) -> dict:
+    """Pause the graph and wait for the customer's answer (human-in-the-loop).
+
+    First run: interrupt() saves the state through the checkpointer and STOPS the graph.
+    invoke() returns, and the UI shows the summary with two buttons.
+    After the click the app calls invoke(Command(resume="approve"|"reject")) with the
+    same thread_id; this node runs again and interrupt() now RETURNS that answer.
+    """
+    pending = state["pending_action"]
+    answer = interrupt({"action": pending["action"], "summary": pending["summary"]})
+    return {"pending_action": {**pending, "approved": answer == APPROVE}}
 
 
 def _cart_changed(state: ShopState, pending: dict) -> bool:
@@ -348,10 +369,30 @@ def execute_action(state: ShopState, config: RunnableConfig) -> dict:
         result = CART_CHANGED
     else:
         result = CONFIRM_TOOLS[action].invoke(pending["args"], with_customer(state, config))
-    return {"context": [{"tool": action, "args": pending["args"], "result": result}],
-            "pending_action": None}
+    update = {"context": [{"tool": action, "args": pending["args"], "result": result}],
+              "pending_action": None}
+    if "error" not in result:
+        # Done: a fixed text built from the DB result. The approval happened outside the
+        # chat history, so an LLM here tended to ask "tasdiqlaysizmi?" AGAIN (prompt
+        # rule 3) — the customer could think nothing happened and order twice.
+        update["messages"] = [AIMessage(done_text(action, result, pending))]
+    return update   # errors (cart changed, status changed...) are explained by respond
+
+
+def done_text(action: str, result: dict, pending: dict) -> str:
+    if action == "cancel_order":
+        return (f"✅ #{result['order_id']} buyurtma bekor qilindi. "
+                "Mahsulotlar omborga qaytarildi.")
+    summary = pending["snapshot"]   # exactly what the customer approved
+    return "\n".join([
+        f"✅ Buyurtmangiz qabul qilindi! Buyurtma raqami: #{result['order_id']} (holati: yangi).",
+        f"Mahsulotlar: {format_uzs(summary['subtotal_uzs'])}",
+        f"Jami (Toshkent): {format_uzs(summary['total_tashkent_uzs'])}",
+        f"Jami (viloyatlarga): {format_uzs(summary['total_region_uzs'])}",
+    ])
 
 
 def route_after_execute(state: ShopState) -> str:
-    # A rejection already wrote its fixed answer; everything else goes to respond.
+    # Rejections and successes already wrote their fixed answer; errors and add_to_cart
+    # go to respond.
     return "end" if isinstance(state["messages"][-1], AIMessage) else "respond"

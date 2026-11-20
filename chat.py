@@ -1,4 +1,4 @@
-"""Phase 4: chat with the agent in the terminal as test customer C-001.
+"""Chat with the agent in the terminal as test customer C-001 (confirmations via interrupt()).
 
 Usage:
     python chat.py          # empty line or "chiqish" to quit
@@ -8,17 +8,19 @@ import uuid
 
 from langchain_core.callbacks import get_usage_metadata_callback
 from langchain_core.messages import HumanMessage
+from langgraph.types import Command
 
-from agent.graph import build_graph, run_config
+from agent.graph import build_graph, pending_confirmation, run_config
+from agent.nodes import APPROVE, REJECT
 
 TEST_CUSTOMER_ID = "C-001"
 
 
-def ask_yes_no(summary: str) -> bool:
-    """Phase 4 confirmation: the customer types y/n. Phase 6 replaces this with interrupt()."""
+def ask_yes_no(summary: str) -> str:
+    """The graph is paused by interrupt(); the customer answers y/n in the terminal."""
     print(f"\n{summary}")
     answer = input("Tasdiqlaysizmi? (y/n): ").strip().lower()
-    return answer in ("y", "ha")
+    return APPROVE if answer in ("y", "ha") else REJECT
 
 
 def print_debug(state: dict, usage_by_model: dict) -> None:
@@ -47,7 +49,7 @@ def format_args(args: dict) -> str:
 def main() -> None:
     agent = build_graph()
     # One thread_id per terminal session: every turn continues the same conversation.
-    config = run_config(thread_id=f"terminal-{uuid.uuid4().hex[:8]}", confirm=ask_yes_no)
+    config = run_config(thread_id=f"terminal-{uuid.uuid4().hex[:8]}")
 
     print(f"TexnoBozor yordamchisi (mijoz: {TEST_CUSTOMER_ID}). Chiqish uchun Enter.\n")
     while True:
@@ -64,6 +66,11 @@ def main() -> None:
                 {"messages": [HumanMessage(question)], "customer_id": TEST_CUSTOMER_ID},
                 config,
             )
+            # interrupt() stopped the graph at confirm_action: ask, then resume the SAME
+            # thread. The answer becomes the return value of interrupt() inside the node.
+            if pending := pending_confirmation(agent, config):
+                answer = ask_yes_no(pending.value["summary"])
+                state = agent.invoke(Command(resume=answer), config)
         print(f"Yordamchi: {state['messages'][-1].content}")
         print_debug(state, usage.usage_metadata)
         print()

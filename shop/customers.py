@@ -19,3 +19,11 @@ def find_by_phone(phone: str) -> dict | None:
         row = conn.execute("SELECT id, name, phone FROM customers WHERE phone = ?",
                            (normalize_phone(phone),)).fetchone()
     return dict(row) if row else None
+
+
+def find_by_id(customer_id: str) -> dict | None:
+    """Return {"id", "name", "phone"} or None. Used to restore a session after a page reload."""
+    with connect() as conn:
+        row = conn.execute("SELECT id, name, phone FROM customers WHERE id = ?",
+                           (customer_id,)).fetchone()
+    return dict(row) if row else None

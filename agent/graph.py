@@ -5,8 +5,9 @@
                          rewrite_query -> policy_rag            (the retry loop)
                     -> chitchat -> END
                     -> handoff -> END
-                    -> confirm_action -> execute_action -> respond -> END
-                                                        -> END      ("n": fixed message)
+                    -> prepare_action -> confirm_action -> execute_action -> respond -> END
+                                                       (interrupt)        -> END ("reject")
+                                      -> execute_action  (add_to_cart: no question)
                                       -> respond -> END  (empty cart, foreign order...)
 
 Data-collecting nodes only fill state["context"]; `respond` writes the one final answer.
@@ -27,7 +28,7 @@ INTENT_TO_NODE = {
     "product": "product_search",
     "policy": "policy_rag",
     "order": "order_support",
-    "action": "confirm_action",
+    "action": "prepare_action",
     "handoff": "handoff",
 }
 # These nodes collect data, then hand over to `respond` for the final answer.
@@ -48,6 +49,7 @@ def build_graph():
     graph.add_node("handoff", nodes.handoff)
     for name, node in DATA_NODES.items():
         graph.add_node(name, node)
+    graph.add_node("prepare_action", nodes.prepare_action)
     graph.add_node("confirm_action", nodes.confirm_action)
     graph.add_node("execute_action", nodes.execute_action)
 
@@ -60,26 +62,29 @@ def build_graph():
     graph.add_conditional_edges("policy_rag", nodes.route_after_policy,
                                 ["respond", "rewrite_query", "handoff"])
     graph.add_edge("rewrite_query", "policy_rag")
-    # Actions: confirm (summary + y/n) -> execute only if approved.
-    graph.add_conditional_edges("confirm_action", nodes.route_after_confirm,
-                                ["execute_action", "respond"])
+    # Actions: prepare (summary) -> confirm (interrupt: wait for the customer) -> execute.
+    graph.add_conditional_edges("prepare_action", nodes.route_after_prepare,
+                                ["confirm_action", "execute_action", "respond"])
+    graph.add_edge("confirm_action", "execute_action")
     graph.add_conditional_edges("execute_action", nodes.route_after_execute,
                                 {"respond": "respond", "end": END})
     for name in ["chitchat", "respond", "handoff"]:
         graph.add_edge(name, END)
 
     # The checkpointer saves the state after every step, keyed by thread_id.
+    # interrupt() needs it: the paused state must be stored somewhere to be resumed later.
     # That is what gives the agent memory between turns.
     return graph.compile(checkpointer=MemorySaver())
 
 
-def run_config(thread_id: str, confirm=None) -> dict:
+def run_config(thread_id: str) -> dict:
     """Same thread_id = same conversation (same saved state).
+    A paused confirmation is resumed with this same config."""
+    return {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
 
-    confirm: function(summary_text) -> bool that asks the customer to approve an order
-    or a cancellation. Without it every such action is refused (safe default).
-    """
-    configurable = {"thread_id": thread_id}
-    if confirm:
-        configurable["confirm"] = confirm
-    return {"configurable": configurable, "recursion_limit": RECURSION_LIMIT}
+
+def pending_confirmation(agent, config: dict):
+    """The open interrupt of this thread (with .id and .value["summary"]), or None.
+    Read from the checkpointer, so it survives app reruns and page reloads."""
+    interrupts = agent.get_state(config).interrupts
+    return interrupts[0] if interrupts else None

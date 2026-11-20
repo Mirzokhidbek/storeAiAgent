@@ -1,19 +1,21 @@
-"""Phase 5 tests: the UI's helpers and its button confirmation, without a browser.
+"""UI tests: helpers, customer switching and the interrupt() buttons, without a browser.
 
 Run:  python -m pytest -v
-The graph is the real one with fake LLMs (as in test_actions.py). We call the same
-make_confirm function app.py uses, so we test the pause -> click -> resume flow.
+Streamlit's AppTest runs the real app.py and clicks/types like a user. The graph is
+the real one; only the LLMs are fakes (as in test_actions.py).
 """
 
 import pytest
 import streamlit as st
 from langchain_core.exceptions import ModelInvalidRequestError, ModelRateLimitError
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
+from streamlit.testing.v1 import AppTest
 
 import agent.graph
 import app
 from agent import nodes
-from agent.graph import build_graph, run_config
+from agent.graph import build_graph, pending_confirmation, run_config
+from agent.nodes import APPROVE
 from agent.prompts import REJECTED_MESSAGES
 from config import MissingSettingError
 from shop import customers, orders
@@ -60,73 +62,6 @@ def test_source_line_moves_to_caption():
     assert app.split_sources(text, ["qaytarish.md"]) == "14 kun ichida qaytarish mumkin."
 
 
-# ======================= button confirmation =======================
-
-def start_order(fake, agent, thread: str):
-    """First run: the graph must pause at confirm_action and hand back the summary."""
-    fake["router"].replies = [nodes.RouteDecision(intent="action")]
-    fake["action"].replies = [nodes.ActionRequest(action="place_order")]
-    with pytest.raises(app.ConfirmationNeeded) as paused:
-        agent.invoke({"messages": [HumanMessage("Savatimdagini buyurtma qil")],
-                      "customer_id": "C-001"},
-                     run_config(thread, confirm=app.make_confirm(None, None)))
-    return paused.value.summary
-
-
-def click(fake, agent, thread: str, summary: str, approved: bool) -> dict:
-    """Second run after a click: resume the same thread (input None)."""
-    # confirm_action runs again on resume, so it asks the action LLM once more.
-    fake["action"].replies = [nodes.ActionRequest(action="place_order")]
-    fake["respond"].replies = [AIMessage("Buyurtmangiz qabul qilindi.")]
-    return agent.invoke(None, run_config(thread, confirm=app.make_confirm(approved, summary)))
-
-
-def test_graph_pauses_and_nothing_is_ordered_before_click(fake):
-    before = db_snapshot()
-
-    summary = start_order(fake, build_graph(), "ui-1")
-
-    assert "Jami" in summary
-    assert db_snapshot() == before
-
-
-def test_click_reject_leaves_db_unchanged(fake):
-    agent = build_graph()
-    summary = start_order(fake, agent, "ui-2")
-    before = db_snapshot()
-
-    state = click(fake, agent, "ui-2", summary, approved=False)
-
-    assert db_snapshot() == before
-    assert state["messages"][-1].content == REJECTED_MESSAGES["place_order"]
-
-
-def test_click_approve_creates_order(fake):
-    agent = build_graph()
-    summary = start_order(fake, agent, "ui-3")
-    count = len(orders.list_my_orders("C-001")["orders"])
-
-    state = click(fake, agent, "ui-3", summary, approved=True)
-
-    assert state["context"][0]["result"]["status"] == "yangi"
-    assert len(orders.list_my_orders("C-001")["orders"]) == count + 1
-
-
-def test_approval_of_an_old_summary_does_not_order_a_changed_cart(fake):
-    """The customer clicked "Tasdiqlash" on summary A; the cart is now B -> ask again."""
-    agent = build_graph()
-    summary = start_order(fake, agent, "ui-4")
-    orders.add_to_cart("C-001", "ACC-001", 1)
-    count = len(orders.list_my_orders("C-001")["orders"])
-
-    fake["action"].replies = [nodes.ActionRequest(action="place_order")]
-    with pytest.raises(app.ConfirmationNeeded) as asked_again:
-        agent.invoke(None, run_config("ui-4", confirm=app.make_confirm(True, summary)))
-
-    assert asked_again.value.summary != summary
-    assert len(orders.list_my_orders("C-001")["orders"]) == count
-
-
 # ======================= switching customers =======================
 # Runs the real app.py with Streamlit's AppTest (no browser): it clicks and types
 # like a user. Only the LLMs are fakes.
@@ -136,7 +71,6 @@ SECRET = "Mening manzilim Chilonzor 5-uy"
 
 @pytest.fixture
 def ui(fake, monkeypatch):
-    from streamlit.testing.v1 import AppTest
     chat_llm = FakeLLM()
     monkeypatch.setattr(nodes, "_chat_llm", lambda: chat_llm)
     # AppTest runs app.py as its own module, so app.get_agent() here would be a different
@@ -144,9 +78,15 @@ def ui(fake, monkeypatch):
     graph = build_graph()
     monkeypatch.setattr(agent.graph, "build_graph", lambda: graph)
     st.cache_resource.clear()        # forget graphs cached by earlier tests
+    return open_app(), chat_llm, graph
+
+
+def open_app(thread_id: str | None = None) -> AppTest:
+    """A new browser tab. With thread_id it is a reload of a page with ?t=<thread_id>."""
     at = AppTest.from_file(app.__file__, default_timeout=10)
-    at.run()
-    return at, chat_llm, graph
+    if thread_id:
+        at.query_params["t"] = thread_id
+    return at.run()
 
 
 def login(at, phone: str) -> None:
@@ -200,3 +140,176 @@ def test_logout_clears_chat_and_memory(ui, fake):
     assert at.session_state["thread_id"] != old_thread
     assert thread_texts(graph, old_thread) == ""
     assert [m["content"] for m in at.session_state["messages"]] == [app.GREETING]
+
+
+# ======================= interrupt() buttons =======================
+
+def order_until_buttons(at, fake) -> None:
+    fake["router"].replies.append(nodes.RouteDecision(intent="action"))
+    fake["action"].replies.append(nodes.ActionRequest(action="place_order"))
+    at.chat_input[0].set_value("Savatimdagini buyurtma qil").run()
+
+
+def button(at, label: str):
+    matches = [b for b in at.main.button if b.label == label]
+    return matches[0] if matches else None
+
+
+def click(at, fake, label: str) -> None:
+    fake["respond"].replies.append(AIMessage("Buyurtmangiz qabul qilindi."))
+    button(at, label).click().run()
+
+
+def order_count() -> int:
+    return len(orders.list_my_orders("C-001")["orders"])
+
+
+def paused(graph, at) -> bool:
+    return pending_confirmation(graph, run_config(at.session_state["thread_id"])) is not None
+
+
+def test_buttons_appear_and_db_is_unchanged_while_paused(ui, fake):
+    at, _, graph = ui
+    login(at, "+998901234567")
+    before = db_snapshot()
+
+    order_until_buttons(at, fake)
+
+    assert button(at, "✅ Tasdiqlash") and button(at, "❌ Bekor qilish")
+    assert paused(graph, at)
+    assert at.chat_input[0].disabled, "answer with the buttons, not by typing"
+    assert db_snapshot() == before
+
+
+def test_approve_button_creates_order(ui, fake):
+    at, _, graph = ui
+    login(at, "+998901234567")
+    count = order_count()
+    order_until_buttons(at, fake)
+
+    click(at, fake, "✅ Tasdiqlash")
+
+    assert order_count() == count + 1
+    assert orders.view_cart("C-001")["items"] == []
+    assert not paused(graph, at) and button(at, "✅ Tasdiqlash") is None
+
+
+def test_reject_button_leaves_db_unchanged(ui, fake):
+    at, _, graph = ui
+    login(at, "+998901234567")
+    order_until_buttons(at, fake)
+    before = db_snapshot()
+
+    click(at, fake, "❌ Bekor qilish")
+
+    assert db_snapshot() == before
+    assert at.session_state["messages"][-1]["content"] == REJECTED_MESSAGES["place_order"]
+    assert not paused(graph, at)
+
+
+def test_reload_keeps_pending_confirmation(ui, fake):
+    at, _, graph = ui
+    login(at, "+998901234567")
+    order_until_buttons(at, fake)
+    count = order_count()
+
+    reloaded = open_app(at.session_state["thread_id"])     # F5 in the browser
+
+    assert reloaded.session_state["customer_id"] == "C-001", "still logged in"
+    assert button(reloaded, "✅ Tasdiqlash"), "the question did not disappear"
+    assert order_count() == count, "a reload must not answer the question"
+
+    click(reloaded, fake, "✅ Tasdiqlash")
+    assert order_count() == count + 1
+
+    again = open_app(at.session_state["thread_id"])        # reload once more
+    assert button(again, "✅ Tasdiqlash") is None, "answered questions do not come back"
+    assert order_count() == count + 1
+
+
+def test_stale_button_after_reload_does_not_order_twice(ui, fake):
+    """The old tab still shows the buttons after the new tab already approved."""
+    at, _, graph = ui
+    login(at, "+998901234567")
+    order_until_buttons(at, fake)
+    count = order_count()
+    click(open_app(at.session_state["thread_id"]), fake, "✅ Tasdiqlash")   # new tab
+
+    button(at, "✅ Tasdiqlash").click().run()                            # old tab
+
+    assert order_count() == count + 1, "exactly one order"
+
+
+def test_logout_drops_pending_confirmation(ui, fake):
+    at, _, graph = ui
+    login(at, "+998901234567")
+    order_until_buttons(at, fake)
+    old_thread = at.session_state["thread_id"]
+    before = db_snapshot()
+
+    at.sidebar.button[0].click().run()                    # "Chiqish"
+
+    reloaded = open_app(old_thread)                       # someone opens the old URL
+    assert reloaded.session_state["customer_id"] is None
+    assert button(reloaded, "✅ Tasdiqlash") is None
+    assert db_snapshot() == before
+
+
+# ======================= no double orders =======================
+# A real double click sends the same button event twice: the second one arrives with the
+# SAME interrupt id after the first already resumed the graph. decide() turns a click
+# into session_state["decision"]; we replay exactly that to simulate the second click.
+
+def replay_click(at, interrupt_id: str) -> None:
+    at.session_state["decision"] = {"id": interrupt_id, "answer": APPROVE}
+    at.run()
+
+
+def pending_id(graph, at) -> str:
+    return pending_confirmation(graph, run_config(at.session_state["thread_id"])).id
+
+
+def test_double_click_on_approve_orders_once(ui, fake):
+    at, _, graph = ui
+    login(at, "+998901234567")
+    order_until_buttons(at, fake)
+    first_click = pending_id(graph, at)
+    count = order_count()
+
+    click(at, fake, "✅ Tasdiqlash")
+    replay_click(at, first_click)            # the second click of the double click
+
+    assert order_count() == count + 1, "exactly one order"
+
+
+def test_reload_after_approve_does_not_order_again(ui, fake):
+    at, _, graph = ui
+    login(at, "+998901234567")
+    order_until_buttons(at, fake)
+    count = order_count()
+    click(at, fake, "✅ Tasdiqlash")
+
+    reloaded = open_app(at.session_state["thread_id"])     # F5 after approving
+    reloaded.run()                                          # and one more re-run
+
+    assert order_count() == count + 1
+    assert button(reloaded, "✅ Tasdiqlash") is None
+    assert "✅ Buyurtmangiz qabul qilindi" in reloaded.session_state["messages"][-1]["content"]
+
+
+def test_old_click_cannot_approve_a_newer_question(ui, fake):
+    """Order 1 is approved; order 2 now waits. A late click from order 1 must not
+    approve order 2 — that is what the interrupt id check in app.resume() is for."""
+    at, _, graph = ui
+    login(at, "+998901234567")
+    order_until_buttons(at, fake)
+    old_click = pending_id(graph, at)
+    click(at, fake, "✅ Tasdiqlash")
+    orders.add_to_cart("C-001", "ACC-001", 1)
+    order_until_buttons(at, fake)             # a new question with a new interrupt id
+    count = order_count()
+
+    replay_click(at, old_click)
+
+    assert order_count() == count, "the old click did nothing"
+    assert paused(graph, at) and button(at, "✅ Tasdiqlash"), "question 2 still waits"
