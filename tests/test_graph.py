@@ -276,3 +276,19 @@ def test_handoff_intent_gives_fixed_message(fake):
 
     assert state["messages"][-1].content == HANDOFF_MESSAGE
     assert fake["respond"].calls == [] and fake["tool"].calls == []
+
+
+def test_rewrite_prompt_asks_for_uzbek(fake, monkeypatch):
+    """Live eval: a Russian question was rewritten in Russian, scored lower each time
+    and ended in handoff. The documents are Uzbek, so rewrites must be Uzbek Latin."""
+    search = FakeRetriever({"Mahsulotni qaytarish mumkinmi?": 0.88})
+    monkeypatch.setattr(nodes, "search_policies", search)
+    fake["router"].replies = [nodes.RouteDecision(intent="policy")]
+    fake["rewrite"].replies = [AIMessage("Mahsulotni qaytarish mumkinmi?")]
+    fake["respond"].replies = [AIMessage("14 kun ichida qaytarish mumkin.")]
+
+    ask("Можно ли вернуть товар?")
+
+    system_prompt = fake["rewrite"].calls[0][0].content
+    assert "o'zbek tilida, lotin yozuvida" in system_prompt
+    assert search.queries[-1] == "Mahsulotni qaytarish mumkinmi?"

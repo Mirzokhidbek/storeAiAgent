@@ -7,6 +7,7 @@ __pycache__/
 *.pyc
 
 # Generated data
+eval_report.json
 data/shop.db
 chroma_db/
 

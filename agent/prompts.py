@@ -81,6 +81,9 @@ Savolni hujjatlardan qidirish uchun qayta yoz:
 - shahar yoki davlat nomini umumiy tushuncha bilan ayt
   (masalan "Samarqandga" -> "viloyatlarga yetkazib berish", "Rossiyaga" -> "xalqaro yetkazib berish")
 - qisqa va aniq bitta savol bo'lsin, oldin sinalgan so'rovlardan farq qilsin
+- HAR DOIM o'zbek tilida, lotin yozuvida yoz — hujjatlar o'zbekcha. Mijoz rus tilida yoki
+  kirill yozuvida so'ragan bo'lsa ham, savolni o'zbekchaga tarjima qil
+  (masalan "Можно ли вернуть товар?" -> "Mahsulotni qaytarish mumkinmi?")
 Faqat qayta yozilgan savolni qaytar, boshqa hech narsa yozma."""
 
 HANDOFF_MESSAGE = ("Bu savol bo'yicha sizni operatorimizga ulayman. "
