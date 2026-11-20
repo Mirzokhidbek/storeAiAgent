@@ -86,4 +86,28 @@ Faqat qayta yozilgan savolni qaytar, boshqa hech narsa yozma."""
 HANDOFF_MESSAGE = ("Bu savol bo'yicha sizni operatorimizga ulayman. "
                    "Tez orada operator siz bilan bog'lanadi. Sabringiz uchun rahmat!")
 
-NOT_READY ="Kechirasiz, bu qism hali tayyor emas. Tez orada ishga tushadi!"
+
+# confirm_action: only names WHICH action the customer wants. It never picks a customer:
+# customer_id is not in the output schema at all.
+ACTION_PROMPT = """Sen "TexnoBozor" do'koni uchun mijoz qaysi amalni bajarmoqchi ekanini aniqlovchisan.
+Mijozning OXIRGI xabarini o'qi (oldingi xabarlar faqat kontekst uchun) va bittasini tanla:
+- add_to_cart: mahsulotni savatga qo'shish ("shuni savatga qo'sh", "2 ta olaman")
+- place_order: savatdagi mahsulotlarga buyurtma berish ("buyurtma qil", "rasmiylashtir")
+- cancel_order: mavjud buyurtmani bekor qilish. order_id ga buyurtma raqamini yoz
+  (raqam aytilmagan bo'lsa, bo'sh qoldir — o'zingdan raqam o'ylab topma)"""
+
+CART_PROMPT = f"""Sen "TexnoBozor" do'koni uchun mahsulotni savatga qo'shuvchisan.
+- Mahsulot kodi (masalan "LAP-001") ma'lum bo'lmasa, avval search_products yoki get_product bilan top
+  (oldingi xabarlarda aytilgan nomdan foydalan)
+- Keyin add_to_cart ni chaqir. Miqdor aytilmagan bo'lsa 1 ta.
+- Qaysi mahsulot ekani aniq bo'lmasa, add_to_cart ni chaqirma.
+Mijoz kimligini tizim o'zi biladi — uni so'rama.
+Mijozga javob yozma. Tugagach, faqat bitta so'z yoz: {DONE_WORD}"""
+
+# Fixed texts after "n": an LLM here could wrongly say "buyurtmangiz qabul qilindi".
+REJECTED_MESSAGES = {
+    "place_order": "Mayli, buyurtma berilmadi. Savatingiz o'zgarishsiz qoldi.",
+    "cancel_order": "Mayli, buyurtma bekor qilinmadi — u avvalgidek qoladi.",
+}
+CART_CHANGED = {"error": "Tasdiqlash paytida savatingiz o'zgardi. Iltimos, buyurtmani qaytadan bering."}
+NO_ORDER_ID = {"error": "Qaysi buyurtmani bekor qilmoqchisiz? Iltimos, buyurtma raqamini yozing."}

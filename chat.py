@@ -14,6 +14,13 @@ from agent.graph import build_graph, run_config
 TEST_CUSTOMER_ID = "C-001"
 
 
+def ask_yes_no(summary: str) -> bool:
+    """Phase 4 confirmation: the customer types y/n. Phase 6 replaces this with interrupt()."""
+    print(f"\n{summary}")
+    answer = input("Tasdiqlaysizmi? (y/n): ").strip().lower()
+    return answer in ("y", "ha")
+
+
 def print_debug(state: dict, usage_by_model: dict) -> None:
     """Shown for learning: what the graph did behind the answer."""
     tools = [describe_call(c) for c in state.get("context") or []]
@@ -40,7 +47,7 @@ def format_args(args: dict) -> str:
 def main() -> None:
     agent = build_graph()
     # One thread_id per terminal session: every turn continues the same conversation.
-    config = run_config(thread_id=f"terminal-{uuid.uuid4().hex[:8]}")
+    config = run_config(thread_id=f"terminal-{uuid.uuid4().hex[:8]}", confirm=ask_yes_no)
 
     print(f"TexnoBozor yordamchisi (mijoz: {TEST_CUSTOMER_ID}). Chiqish uchun Enter.\n")
     while True:

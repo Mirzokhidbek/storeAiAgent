@@ -5,7 +5,9 @@
                          rewrite_query -> policy_rag            (the retry loop)
                     -> chitchat -> END
                     -> handoff -> END
-                    -> confirm_action (stub until a later phase) -> END
+                    -> confirm_action -> execute_action -> respond -> END
+                                                        -> END      ("n": fixed message)
+                                      -> respond -> END  (empty cart, foreign order...)
 
 Data-collecting nodes only fill state["context"]; `respond` writes the one final answer.
 """
@@ -30,7 +32,6 @@ INTENT_TO_NODE = {
 }
 # These nodes collect data, then hand over to `respond` for the final answer.
 DATA_NODES = {"product_search": nodes.product_search, "order_support": nodes.order_support}
-STUB_NODES = ["confirm_action"]
 
 
 def route_by_intent(state: ShopState) -> str:
@@ -47,8 +48,8 @@ def build_graph():
     graph.add_node("handoff", nodes.handoff)
     for name, node in DATA_NODES.items():
         graph.add_node(name, node)
-    for name in STUB_NODES:
-        graph.add_node(name, nodes.not_ready)
+    graph.add_node("confirm_action", nodes.confirm_action)
+    graph.add_node("execute_action", nodes.execute_action)
 
     graph.add_edge(START, "router")
     graph.add_conditional_edges("router", route_by_intent, list(INTENT_TO_NODE.values()))
@@ -59,7 +60,12 @@ def build_graph():
     graph.add_conditional_edges("policy_rag", nodes.route_after_policy,
                                 ["respond", "rewrite_query", "handoff"])
     graph.add_edge("rewrite_query", "policy_rag")
-    for name in ["chitchat", "respond", "handoff", *STUB_NODES]:
+    # Actions: confirm (summary + y/n) -> execute only if approved.
+    graph.add_conditional_edges("confirm_action", nodes.route_after_confirm,
+                                ["execute_action", "respond"])
+    graph.add_conditional_edges("execute_action", nodes.route_after_execute,
+                                {"respond": "respond", "end": END})
+    for name in ["chitchat", "respond", "handoff"]:
         graph.add_edge(name, END)
 
     # The checkpointer saves the state after every step, keyed by thread_id.
@@ -67,6 +73,13 @@ def build_graph():
     return graph.compile(checkpointer=MemorySaver())
 
 
-def run_config(thread_id: str) -> dict:
-    """Same thread_id = same conversation (same saved state)."""
-    return {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
+def run_config(thread_id: str, confirm=None) -> dict:
+    """Same thread_id = same conversation (same saved state).
+
+    confirm: function(summary_text) -> bool that asks the customer to approve an order
+    or a cancellation. Without it every such action is refused (safe default).
+    """
+    configurable = {"thread_id": thread_id}
+    if confirm:
+        configurable["confirm"] = confirm
+    return {"configurable": configurable, "recursion_limit": RECURSION_LIMIT}

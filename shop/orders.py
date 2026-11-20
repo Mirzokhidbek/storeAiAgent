@@ -13,6 +13,12 @@ from datetime import date
 from shop.db import connect
 
 CANCELLABLE_STATUSES = ("yangi", "tolandi")
+
+# Delivery prices from data/policies/yetkazib_berish.md (SPEC §5). Code computes them,
+# so the confirmation summary never depends on the LLM reading a document correctly.
+TASHKENT_FREE_FROM_UZS = 1_000_000
+TASHKENT_DELIVERY_UZS = 30_000
+REGION_DELIVERY_UZS = 50_000
 LOGIN_REQUIRED = {"error": "Buyurtmalar bilan ishlash uchun avval tizimga kiring (chap paneldagi telefon raqam orqali)."}
 # Same message for "does not exist" and "belongs to someone else":
 # otherwise a user could probe which order numbers exist.
@@ -100,6 +106,31 @@ def view_cart(customer_id: str | None) -> dict:
 
 # ---------- write ----------
 
+def delivery_fees(subtotal_uzs: int) -> dict:
+    """Delivery price for Tashkent and for the regions (customers have no address yet)."""
+    tashkent = 0 if subtotal_uzs >= TASHKENT_FREE_FROM_UZS else TASHKENT_DELIVERY_UZS
+    return {"tashkent_uzs": tashkent, "region_uzs": REGION_DELIVERY_UZS}
+
+
+def order_summary(customer_id: str | None) -> dict:
+    """What place_order would create right now: cart items, subtotal, delivery, totals.
+    Read-only. The agent shows this to the customer before asking for confirmation."""
+    if not customer_id:
+        return LOGIN_REQUIRED
+    with connect() as conn:
+        cart = _cart(conn, customer_id)
+    if not cart["items"]:
+        return {"error": "Savatingiz bo'sh. Avval mahsulot qo'shing."}
+    short = [i["name"] for i in cart["items"] if i["quantity"] > i["stock"]]
+    if short:
+        return {"error": f"Zaxirada yetarli emas: {', '.join(short)}. Savatni yangilang."}
+
+    fees = delivery_fees(cart["total_uzs"])
+    return {"items": cart["items"], "subtotal_uzs": cart["total_uzs"], "delivery": fees,
+            "total_tashkent_uzs": cart["total_uzs"] + fees["tashkent_uzs"],
+            "total_region_uzs": cart["total_uzs"] + fees["region_uzs"]}
+
+
 def add_to_cart(customer_id: str | None, product_id: str, quantity: int = 1) -> dict:
     if not customer_id:
         return LOGIN_REQUIRED
@@ -168,6 +199,20 @@ def place_order(customer_id: str | None) -> dict:
             "total_uzs": cart["total_uzs"]}
 
 
+def _not_cancellable(status: str) -> dict:
+    return {"error": f"Bu buyurtmani bekor qilib bo'lmaydi: holati '{status}'. "
+                     "Faqat 'yangi' yoki 'tolandi' holatidagi buyurtmalar bekor qilinadi."}
+
+
+def cancel_preview(customer_id: str | None, order_id: str) -> dict:
+    """Read-only: the order cancel_order would cancel, or the error it would return.
+    Lets the agent refuse a foreign/delivered order BEFORE asking for confirmation."""
+    order = get_order_status(customer_id, order_id)
+    if "error" not in order and order["status"] not in CANCELLABLE_STATUSES:
+        return _not_cancellable(order["status"])
+    return order
+
+
 def cancel_order(customer_id: str | None, order_id: str) -> dict:
     """Cancel own order if status allows. HIGH RISK: the agent must get user confirmation first."""
     if not customer_id:
@@ -178,8 +223,7 @@ def cancel_order(customer_id: str | None, order_id: str) -> dict:
         if order is None:
             return ORDER_NOT_FOUND
         if order["status"] not in CANCELLABLE_STATUSES:
-            return {"error": f"Bu buyurtmani bekor qilib bo'lmaydi: holati '{order['status']}'. "
-                             "Faqat 'yangi' yoki 'tolandi' holatidagi buyurtmalar bekor qilinadi."}
+            return _not_cancellable(order["status"])
 
         conn.execute("UPDATE orders SET status = 'bekor_qilindi' WHERE id = ?", (order["id"],))
         # Return the items to stock, mirroring what place_order took away.

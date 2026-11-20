@@ -2,6 +2,7 @@
 
 import json
 from functools import lru_cache
+from typing import Literal
 
 from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage, SystemMessage,
                                      ToolMessage, trim_messages)
@@ -10,12 +11,14 @@ from pydantic import BaseModel, Field
 
 import config
 from agent.llm import get_chat_model
-from agent.prompts import (CHITCHAT_PROMPT, HANDOFF_MESSAGE, NO_INFO, NOT_READY,
-                           ORDER_SUPPORT_PROMPT, PRODUCT_SEARCH_PROMPT, RESPOND_PROMPT,
+from agent.prompts import (ACTION_PROMPT, CART_CHANGED, CART_PROMPT, CHITCHAT_PROMPT,
+                           HANDOFF_MESSAGE, NO_INFO, NO_ORDER_ID, ORDER_SUPPORT_PROMPT,
+                           PRODUCT_SEARCH_PROMPT, REJECTED_MESSAGES, RESPOND_PROMPT,
                            REWRITE_PROMPT, ROUTER_PROMPT)
 from agent.state import Intent, ShopState
-from agent.tools import CATALOG_TOOLS, ORDER_READ_TOOLS
+from agent.tools import CART_TOOLS, CATALOG_TOOLS, CONFIRM_REQUIRED_TOOLS, ORDER_READ_TOOLS
 from rag.retriever import search_policies
+from shop import orders
 
 # How much history each LLM call sees. Protects the context window (and the quota).
 ROUTER_HISTORY = 6     # a few messages are enough to resolve "uning narxi qancha?"
@@ -24,13 +27,25 @@ ANSWER_HISTORY = 20
 MAX_TOOL_ROUNDS = 3
 # Tools each node may use. place_order / cancel_order are not here on purpose:
 # the LLM in these nodes cannot even see them.
-TOOL_GROUPS = {"catalog": CATALOG_TOOLS, "order": ORDER_READ_TOOLS}
+TOOL_GROUPS = {"catalog": CATALOG_TOOLS, "order": ORDER_READ_TOOLS,
+               "cart": CATALOG_TOOLS + CART_TOOLS}
+# Run only by execute_action, never offered to an LLM.
+CONFIRM_TOOLS = {t.name: t for t in CONFIRM_REQUIRED_TOOLS}
 
 
 class RouteDecision(BaseModel):
     """Structured output schema: the model must fill exactly this field, nothing else."""
 
     intent: Intent = Field(description="Mijozning oxirgi xabari turi")
+
+
+class ActionRequest(BaseModel):
+    """Which action the customer asked for. No customer_id field on purpose:
+    the LLM has no way to choose whose cart or order is touched."""
+
+    action: Literal["add_to_cart", "place_order", "cancel_order"]
+    order_id: str | None = Field(default=None,
+                                 description="Bekor qilinadigan buyurtma raqami (faqat cancel_order)")
 
 
 @lru_cache
@@ -60,6 +75,12 @@ def _rewrite_llm():
 
 
 @lru_cache
+def _action_llm():
+    llm = get_chat_model(temperature=0, thinking_level="low")
+    return llm.with_structured_output(ActionRequest)
+
+
+@lru_cache
 def _tool_llm(group: str):
     # Picking tools is a simple task, so low thinking is enough.
     return get_chat_model(thinking_level="low").bind_tools(TOOL_GROUPS[group])
@@ -81,7 +102,7 @@ def router(state: ShopState) -> dict:
     decision: RouteDecision = _router_llm().invoke([SystemMessage(ROUTER_PROMPT), *history])
     # A new question starts with a clean per-turn scratchpad.
     return {"intent": decision.intent, "context": [], "sources": [], "retries": 0,
-            "search_query": None}
+            "search_query": None, "pending_action": None}
 
 
 def chitchat(state: ShopState) -> dict:
@@ -95,6 +116,12 @@ def _last_question(state: ShopState) -> str:
     return human[-1].content if human else ""
 
 
+def with_customer(state: ShopState, config: RunnableConfig) -> RunnableConfig:
+    """customer_id comes from graph state, never from the LLM (see agent/tools.py)."""
+    return {**config, "configurable": {**config.get("configurable", {}),
+                                       "customer_id": state.get("customer_id")}}
+
+
 def run_tool_loop(state: ShopState, config: RunnableConfig, group: str, prompt: str) -> list[dict]:
     """Let the LLM call tools until it has enough data; return every call as context.
 
@@ -102,9 +129,7 @@ def run_tool_loop(state: ShopState, config: RunnableConfig, group: str, prompt: 
     so the chat history (and every later prompt) stays short.
     """
     by_name = {t.name: t for t in TOOL_GROUPS[group]}
-    # customer_id comes from graph state, never from the LLM (see agent/tools.py).
-    tool_config = {**config, "configurable": {**config.get("configurable", {}),
-                                              "customer_id": state.get("customer_id")}}
+    tool_config = with_customer(state, config)
     messages = [SystemMessage(prompt), *recent_messages(state["messages"], ROUTER_HISTORY)]
     context = []
 
@@ -228,6 +253,105 @@ def respond(state: ShopState) -> dict:
     return {"messages": [AIMessage(reply)], "sources": sources}
 
 
-def not_ready(state: ShopState) -> dict:
-    """Temporary stand-in for nodes that later sub-phases will build."""
-    return {"messages": [AIMessage(NOT_READY)]}
+# ======================= actions: confirm_action -> execute_action =======================
+
+def format_uzs(amount: int) -> str:
+    """4500000 -> "4 500 000 so'm" (SPEC §9, rule 6)."""
+    return f"{amount:,}".replace(",", " ") + " so'm"
+
+
+def place_order_text(summary: dict) -> str:
+    lines = ["Buyurtma xulosasi:"]
+    for item in summary["items"]:
+        lines.append(f"  • {item['name']} ({item['product_id']}) — {item['quantity']} ta × "
+                     f"{format_uzs(item['price_uzs'])} = {format_uzs(item['subtotal_uzs'])}")
+    fee = summary["delivery"]["tashkent_uzs"]
+    lines += [
+        f"Mahsulotlar: {format_uzs(summary['subtotal_uzs'])}",
+        f"Yetkazib berish (Toshkent): {format_uzs(fee) if fee else 'bepul'}",
+        f"Jami (Toshkent): {format_uzs(summary['total_tashkent_uzs'])}",
+        f"Viloyatlarga yetkazib berilsa: +{format_uzs(summary['delivery']['region_uzs'])}, "
+        f"jami {format_uzs(summary['total_region_uzs'])}",
+        "Buyurtma berilsinmi?",
+    ]
+    return "\n".join(lines)
+
+
+def cancel_order_text(order: dict) -> str:
+    lines = [f"Buyurtma #{order['order_id']} (holati: {order['status']}) bekor qilinadi:"]
+    lines += [f"  • {i['name']} — {i['quantity']} ta" for i in order["items"]]
+    lines.append("Bekor qilinsinmi?")
+    return "\n".join(lines)
+
+
+def ask_customer(config: RunnableConfig, text: str) -> bool:
+    """Ask the customer to approve. Phase 4: the app passes a `confirm` function in the
+    config (the terminal asks y/n). Phase 6 replaces this with LangGraph interrupt().
+    No confirm function = nobody can say "yes" = the action is NOT done."""
+    confirm = (config or {}).get("configurable", {}).get("confirm")
+    return bool(confirm and confirm(text))
+
+
+def confirm_action(state: ShopState, config: RunnableConfig) -> dict:
+    """Decide which action, check it can be done, show a summary, ask for approval."""
+    history = recent_messages(state["messages"], ROUTER_HISTORY)
+    request: ActionRequest = _action_llm().invoke([SystemMessage(ACTION_PROMPT), *history])
+    customer_id = state.get("customer_id")
+
+    if request.action == "add_to_cart":
+        # Low risk (SPEC §7): no confirmation, execute_action runs it right away.
+        return {"pending_action": {"action": "add_to_cart", "approved": True}}
+
+    # Read-only check first. Its name goes into context, so the debug line shows that
+    # place_order / cancel_order themselves did NOT run.
+    if request.action == "place_order":
+        args, check_name, check = {}, "order_summary", orders.order_summary(customer_id)
+    else:
+        args, check_name = {"order_id": request.order_id}, "cancel_preview"
+        check = (orders.cancel_preview(customer_id, request.order_id)
+                 if request.order_id else NO_ORDER_ID)
+
+    if "error" in check:
+        # Empty cart, foreign order, already delivered...: refuse before asking anything.
+        return {"pending_action": None,
+                "context": [{"tool": check_name, "args": args, "result": check}]}
+
+    text = place_order_text(check) if request.action == "place_order" else cancel_order_text(check)
+    return {"pending_action": {"action": request.action, "args": args, "summary": text,
+                               "snapshot": check, "approved": ask_customer(config, text)}}
+
+
+def route_after_confirm(state: ShopState) -> str:
+    return "execute_action" if state.get("pending_action") else "respond"
+
+
+def _cart_changed(state: ShopState, pending: dict) -> bool:
+    """The customer approved one summary; the order must be created from exactly that.
+    Matters in Phase 6, when time passes between the question and the click."""
+    return orders.order_summary(state.get("customer_id")) != pending["snapshot"]
+
+
+def execute_action(state: ShopState, config: RunnableConfig) -> dict:
+    """The ONLY place that runs place_order / cancel_order, and only when approved."""
+    pending = state["pending_action"]
+    action = pending["action"]
+
+    if not pending["approved"]:
+        # "n": touch nothing in the database, answer with a fixed text.
+        return {"messages": [AIMessage(REJECTED_MESSAGES[action])], "pending_action": None}
+
+    if action == "add_to_cart":
+        return {"context": run_tool_loop(state, config, "cart", CART_PROMPT),
+                "pending_action": None}
+
+    if action == "place_order" and _cart_changed(state, pending):
+        result = CART_CHANGED
+    else:
+        result = CONFIRM_TOOLS[action].invoke(pending["args"], with_customer(state, config))
+    return {"context": [{"tool": action, "args": pending["args"], "result": result}],
+            "pending_action": None}
+
+
+def route_after_execute(state: ShopState) -> str:
+    # A rejection already wrote its fixed answer; everything else goes to respond.
+    return "end" if isinstance(state["messages"][-1], AIMessage) else "respond"
