@@ -164,7 +164,19 @@ def allowed_amounts(case: dict, db: dict, context: list[dict]) -> set[int]:
     said = " ".join([case["question"], *case.get("setup_turns", [])])
     limits = {c["args"][key] for c in context if c["tool"] == "search_products"
               for key in ("min_price", "max_price") if c["args"].get(key)}
-    return {row[4] for row in db["products"]} | POLICY_AMOUNTS | amounts_in(said) | limits
+    return ({row[4] for row in db["products"]} | POLICY_AMOUNTS | amounts_in(said) | limits
+            | price_differences(context))
+
+
+def price_differences(context: list[dict]) -> set[int]:
+    """"HP 500 000 so'mga arzonroq": the difference between two prices the tools returned
+    in THIS answer. Only these products, not the whole catalog, so the check stays strict."""
+    prices = set()
+    for call in context:
+        result = call["result"] if isinstance(call["result"], dict) else {}
+        products = result.get("products", [result] if "price_uzs" in result else [])
+        prices |= {p["price_uzs"] for p in products if isinstance(p, dict) and "price_uzs" in p}
+    return {abs(a - b) for a in prices for b in prices if a != b}
 
 
 def run_with_retry(case: dict, backend: str) -> dict:

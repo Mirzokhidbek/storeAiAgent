@@ -5,7 +5,7 @@ store-policy questions, shows order status, adds to cart, and places or cancels 
 after the customer confirms. Replies are in Uzbek.
 
 Learning project: Gemini · LangChain · LangGraph · RAG (Chroma) · SQLite · MCP · Streamlit.
-**Status: Phase 7 of 7 complete.** Full spec: [SPEC.md](SPEC.md).
+**Status: Phase 7 of 7 complete.** Latest eval: 30/30 passed. Full spec: [SPEC.md](SPEC.md).
 
 ## How it works
 
@@ -48,7 +48,7 @@ Other commands: `python chat.py` (terminal chat), `python ask_policy.py "Kafolat
 
 ## Test results
 
-**150 tests pass.** They use fake LLMs and a temporary copy of the database, so they need no API key and cost nothing.
+**153 tests pass.** They use fake LLMs and a temporary copy of the database, so they need no API key and cost nothing.
 
 | File | Tests | What it checks |
 |---|---|---|
@@ -57,7 +57,7 @@ Other commands: `python chat.py` (terminal chat), `python ask_policy.py "Kafolat
 | `test_actions.py` | 17 | No order while paused, approve and reject, empty cart, someone else's order, cart changed while paused, no double resume |
 | `test_app.py` | 21 | Streamlit via AppTest: login, Uzbek error messages, buttons, page reload, double click, logout clears memory |
 | `test_mcp.py` | 3 | Real MCP servers return exactly what the in-process tools return, and the LLM never sees `customer_id` |
-| `test_eval.py` | 52 | The evaluator itself: case file format, and each check catches bad answers and passes good ones |
+| `test_eval.py` | 55 | The evaluator itself: case file format, and each check catches bad answers and passes good ones |
 
 **Live checks with Gemini:**
 - Terminal and browser: every intent works, and follow-ups like "uning narxi qancha?" use memory.
@@ -72,15 +72,15 @@ so `data/shop.db` is never touched (checked by hash). Confirmations are always r
 
 Covered: every category in SPEC §15, plus Cyrillic Uzbek, Russian and questions without apostrophes.
 
-**Latest full run: 29/30 passed**, about 72k tokens (~$0.04, estimated) and 8.6 minutes.
+**Latest full run: 30/30 passed (100%)**: 73 504 tokens (64 447 in, 9 057 out), about $0.042 (estimated), 8.5 minutes.
+`data/shop.db` was unchanged after the run.
 Failed cases were re-run 2–3 times to separate random failures from real ones.
 
 Fixed during Phase 7 (each re-checked live afterwards):
 - Russian questions were rewritten in Russian and missed the Uzbek docs. Rewrites are now always in Uzbek Latin (passed 3/3).
 - `product-none`: the agent offered laptops above the 100 000 so'm budget without saying they cost more. The respond prompt now requires saying so (passed 3/3).
 - `cyrillic-order`: the agent sometimes wrote "yetkazib berilgan" instead of "yetkazildi". The meaning is correct, so the order cases now accept both (passed 2/2).
-
-The full 30-question run has not been repeated since these last two fixes.
+- `compare-lap1-lap2`: the answer said "HP 500 000 so'mga arzonroq", a correct difference of two real prices, but the price check counted it as invented. The check now allows differences between prices the tools returned in that answer (passed 2/2).
 
 ## Known limits
 

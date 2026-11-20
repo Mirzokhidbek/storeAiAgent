@@ -187,3 +187,36 @@ def test_delivered_status_accepts_both_phrasings(case_id):
     for answer in ["Holati: yetkazildi.", "17-noyabrda yetkazib berilgan."]:
         assert run_eval.evaluate(case, fake_run(intent="order", answer=answer)) == [], answer
     assert run_eval.evaluate(case, fake_run(intent="order", answer="Buyurtmangiz yo'lda."))
+
+
+
+# ======================= price differences (compare) =======================
+
+def compare_context(*prices) -> list[dict]:
+    products = [{"id": f"P{i}", "price_uzs": price} for i, price in enumerate(prices)]
+    return [{"tool": "compare_products", "args": {}, "result": {"products": products}}]
+
+
+def test_difference_between_compared_prices_is_allowed():
+    """Live eval: "HP modeli esa 500 000 so'mga arzonroq" (5 400 000 - 4 900 000)."""
+    case = {"question": "LAP-001 va LAP-002 ni solishtir"}
+    allowed = run_eval.allowed_amounts(case, {"products": []},
+                                       compare_context(5_400_000, 4_900_000))
+    run = fake_run(answer="HP modeli esa 500 000 so'mga arzonroq.", allowed_amounts=allowed)
+    assert run_eval.run_check("prices_from_db", {}, run) is None
+
+
+def test_invented_difference_still_fails():
+    case = {"question": "LAP-001 va LAP-002 ni solishtir"}
+    allowed = run_eval.allowed_amounts(case, {"products": []},
+                                       compare_context(5_400_000, 4_900_000))
+    run = fake_run(answer="HP modeli esa 700 000 so'mga arzonroq.", allowed_amounts=allowed)
+    assert "700000" in run_eval.run_check("prices_from_db", {}, run)
+
+
+def test_differences_only_from_products_in_this_answer():
+    # get_product returns a single product dict (no "products" list).
+    single = [{"tool": "get_product", "args": {}, "result": {"id": "LAP-001", "price_uzs": 5_400_000}}]
+    assert run_eval.price_differences(single) == set()
+    assert run_eval.price_differences(compare_context(5_400_000, 4_900_000, 4_600_000)) == {
+        500_000, 800_000, 300_000}
