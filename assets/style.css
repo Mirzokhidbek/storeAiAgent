@@ -22,6 +22,10 @@
   padding: .55rem 1rem;
 }
 [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) p { margin: 0; }
+/* Streamlit pulls markdown up by -16px; inside a bubble that cuts the text off. */
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) [data-testid="stMarkdownContainer"] {
+  margin-bottom: 0;
+}
 
 /* assistant: plain text, full width */
 [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] {

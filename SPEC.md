@@ -421,7 +421,7 @@ Log per request (to console): intent, tools called, token usage if available.
 texnobozor-ai/
 ├── CLAUDE.md
 ├── SPEC.md
-├── README.md                 # Uzbek: what it is, how to run
+├── README.md                 # English (user's choice): what it is, how to run, screenshots, results
 ├── .env.example
 ├── .gitignore
 ├── requirements.txt
@@ -546,5 +546,5 @@ Must include at least:
 ## 16. Definition of done
 
 - All 8 phases complete and acceptance checks pass.
-- `README.md` (Uzbek) explains setup and run in under 10 steps.
+- `README.md` explains setup and run in under 10 steps. Language changed from Uzbek to English at the user's request (the app's own UI and replies stay Uzbek).
 - A new user can clone, add `GOOGLE_API_KEY`, run the four commands in CLAUDE.md, and chat with the assistant.
