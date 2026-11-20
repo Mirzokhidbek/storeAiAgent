@@ -1,17 +1,28 @@
 """Graph nodes. Each node takes the state and returns only the fields it changes."""
 
+import json
 from functools import lru_cache
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, trim_messages
+from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage, SystemMessage,
+                                     ToolMessage, trim_messages)
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 
 from agent.llm import get_chat_model
-from agent.prompts import CHITCHAT_PROMPT, NOT_READY, ROUTER_PROMPT
+from agent.prompts import (CHITCHAT_PROMPT, NO_INFO, NOT_READY, ORDER_SUPPORT_PROMPT,
+                           PRODUCT_SEARCH_PROMPT, RESPOND_PROMPT, ROUTER_PROMPT)
 from agent.state import Intent, ShopState
+from agent.tools import CATALOG_TOOLS, ORDER_READ_TOOLS
+from rag.retriever import search_policies
 
 # How much history each LLM call sees. Protects the context window (and the quota).
 ROUTER_HISTORY = 6     # a few messages are enough to resolve "uning narxi qancha?"
 ANSWER_HISTORY = 20
+# Max LLM <-> tool round trips in one node (e.g. search, then get_product). Caps cost.
+MAX_TOOL_ROUNDS = 3
+# Tools each node may use. place_order / cancel_order are not here on purpose:
+# the LLM in these nodes cannot even see them.
+TOOL_GROUPS = {"catalog": CATALOG_TOOLS, "order": ORDER_READ_TOOLS}
 
 
 class RouteDecision(BaseModel):
@@ -31,6 +42,19 @@ def _router_llm():
 @lru_cache
 def _chat_llm():
     return get_chat_model()
+
+
+@lru_cache
+def _respond_llm():
+    # Hidden thinking tokens count against LLM_MAX_TOKENS. With full thinking, long answers
+    # got cut off mid-sentence. The data is already collected, so low thinking is enough.
+    return get_chat_model(thinking_level="low")
+
+
+@lru_cache
+def _tool_llm(group: str):
+    # Picking tools is a simple task, so low thinking is enough.
+    return get_chat_model(thinking_level="low").bind_tools(TOOL_GROUPS[group])
 
 
 def recent_messages(messages: list[BaseMessage], count: int) -> list[BaseMessage]:
@@ -55,6 +79,92 @@ def chitchat(state: ShopState) -> dict:
     history = recent_messages(state["messages"], ANSWER_HISTORY)
     reply = _chat_llm().invoke([SystemMessage(CHITCHAT_PROMPT), *history])
     return {"messages": [AIMessage(reply.text.strip())]}
+
+
+def _last_question(state: ShopState) -> str:
+    human = [m for m in state["messages"] if isinstance(m, HumanMessage)]
+    return human[-1].content if human else ""
+
+
+def run_tool_loop(state: ShopState, config: RunnableConfig, group: str, prompt: str) -> list[dict]:
+    """Let the LLM call tools until it has enough data; return every call as context.
+
+    The tool messages stay inside this function. They are not added to state["messages"],
+    so the chat history (and every later prompt) stays short.
+    """
+    by_name = {t.name: t for t in TOOL_GROUPS[group]}
+    # customer_id comes from graph state, never from the LLM (see agent/tools.py).
+    tool_config = {**config, "configurable": {**config.get("configurable", {}),
+                                              "customer_id": state.get("customer_id")}}
+    messages = [SystemMessage(prompt), *recent_messages(state["messages"], ROUTER_HISTORY)]
+    context = []
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        ai = _tool_llm(group).invoke(messages, config)
+        if not ai.tool_calls:
+            break  # the model said it is done
+        messages.append(ai)
+        for call in ai.tool_calls:
+            tool = by_name.get(call["name"])
+            result = (tool.invoke(call["args"], tool_config) if tool
+                      else {"error": f"Noma'lum tool: {call['name']}"})
+            context.append({"tool": call["name"], "args": call["args"], "result": result})
+            messages.append(ToolMessage(json.dumps(result, ensure_ascii=False),
+                                        tool_call_id=call["id"]))
+    return context
+
+
+def product_search(state: ShopState, config: RunnableConfig) -> dict:
+    return {"context": run_tool_loop(state, config, "catalog", PRODUCT_SEARCH_PROMPT)}
+
+
+def order_support(state: ShopState, config: RunnableConfig) -> dict:
+    return {"context": run_tool_loop(state, config, "order", ORDER_SUPPORT_PROMPT)}
+
+
+def policy_rag(state: ShopState) -> dict:
+    """Retrieval step of RAG. Only chunks above the score threshold come back."""
+    query = _last_question(state)
+    chunks = search_policies(query)
+    # Phase 4c: an empty result will go to rewrite_query instead of straight to respond.
+    return {"context": [{"tool": "search_policies", "args": {"query": query}, "result": chunks}]}
+
+
+def _policy_chunks(context: list[dict]) -> list[dict]:
+    return [c for item in context if item["tool"] == "search_policies" for c in item["result"]]
+
+
+def format_context(context: list[dict]) -> str:
+    """Delimiters mark where trusted instructions end and plain data begins (SPEC §12)."""
+    parts = [f'<natija tool="{item["tool"]}">\n'
+             f'{json.dumps(item["result"], ensure_ascii=False, indent=1)}\n</natija>'
+             for item in context]
+    return "<malumotlar>\n" + "\n".join(parts) + "\n</malumotlar>"
+
+
+def _strip_source_lines(text: str) -> str:
+    # Sources are code's job. If the model wrote one anyway, drop it: it may be invented.
+    return "\n".join(l for l in text.splitlines() if not l.strip().startswith("Manba:")).strip()
+
+
+def respond(state: ShopState) -> dict:
+    """Generation step: write the final Uzbek answer from context, then add sources by code."""
+    context = state.get("context") or []
+    chunks = _policy_chunks(context)
+
+    if state["intent"] == "policy" and not chunks:
+        # Nothing passed the threshold: answer without the LLM, so it cannot invent anything.
+        return {"messages": [AIMessage(NO_INFO)], "sources": []}
+
+    history = recent_messages(state["messages"], ANSWER_HISTORY)
+    # One system message: Gemini expects the system prompt only at the start.
+    system = SystemMessage(f"{RESPOND_PROMPT}\n\nOxirgi savol uchun ma'lumotlar:\n{format_context(context)}")
+    reply = _strip_source_lines(_respond_llm().invoke([system, *history]).text)
+
+    sources = [] if NO_INFO in reply else sorted({c["source"] for c in chunks})
+    if sources:
+        reply += f"\n\nManba: {', '.join(sources)}"
+    return {"messages": [AIMessage(reply)], "sources": sources}
 
 
 def not_ready(state: ShopState) -> dict:

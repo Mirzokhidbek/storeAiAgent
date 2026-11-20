@@ -6,11 +6,26 @@ Usage:
 
 import uuid
 
+from langchain_core.callbacks import get_usage_metadata_callback
 from langchain_core.messages import HumanMessage
 
 from agent.graph import build_graph, run_config
 
 TEST_CUSTOMER_ID = "C-001"
+
+
+def print_debug(state: dict, usage_by_model: dict) -> None:
+    """Shown for learning: what the graph did behind the answer."""
+    tools = [f"{c['tool']}({format_args(c['args'])})" for c in state.get("context") or []]
+    print(f"   [intent: {state['intent']}]")
+    print(f"   [tool'lar: {', '.join(tools) or "yo'q"}]")
+    tokens_in = sum(u.get("input_tokens", 0) for u in usage_by_model.values())
+    tokens_out = sum(u.get("output_tokens", 0) for u in usage_by_model.values())
+    print(f"   [tokenlar: kirish {tokens_in}, chiqish {tokens_out}, jami {tokens_in + tokens_out}]")
+
+
+def format_args(args: dict) -> str:
+    return ", ".join(f"{k}={v!r}" for k, v in args.items())
 
 
 def main() -> None:
@@ -26,12 +41,16 @@ def main() -> None:
 
         # Only the new message is sent; the checkpointer adds the earlier history itself.
         # customer_id comes from code, never from the LLM.
-        state = agent.invoke(
-            {"messages": [HumanMessage(question)], "customer_id": TEST_CUSTOMER_ID},
-            config,
-        )
-        print(f"   [intent: {state['intent']}]")
-        print(f"Yordamchi: {state['messages'][-1].content}\n")
+        # The callback adds up token usage of every LLM call in this turn
+        # (router + tool-calling + respond), not just the last one.
+        with get_usage_metadata_callback() as usage:
+            state = agent.invoke(
+                {"messages": [HumanMessage(question)], "customer_id": TEST_CUSTOMER_ID},
+                config,
+            )
+        print(f"Yordamchi: {state['messages'][-1].content}")
+        print_debug(state, usage.usage_metadata)
+        print()
 
     print("Xayr!")
 
