@@ -23,6 +23,9 @@ RAG_SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.75"))
 RAG_LOW_THRESHOLD = float(os.getenv("RAG_LOW_THRESHOLD", "0.68"))
 MAX_RETRIEVAL_RETRIES = int(os.getenv("MAX_RETRIEVAL_RETRIES", "2"))
 
+# Where tools run: "mcp" = MCP servers in mcp_servers/ (Phase 6b), "local" = shop/ in-process.
+TOOL_BACKEND = os.getenv("TOOL_BACKEND", "mcp").strip().lower()
+
 
 class MissingSettingError(RuntimeError):
     """A required .env value is empty. Its own type, so the UI can show a clear message."""

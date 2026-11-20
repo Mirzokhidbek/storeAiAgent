@@ -1,11 +1,13 @@
 """SQLite helpers. The database is the single source of truth for prices, stock and orders."""
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "shop.db"
+# SHOP_DB_PATH lets tests point an MCP server (a separate process) at a temp database.
+DB_PATH = Path(os.getenv("SHOP_DB_PATH") or Path(__file__).resolve().parent.parent / "data" / "shop.db")
 
 SCHEMA = """
 CREATE TABLE products (

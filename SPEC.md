@@ -54,6 +54,7 @@ RAG_TOP_K=4
 RAG_SCORE_THRESHOLD=0.75     # "confident" line, calibrated in Phase 2, see §6 "Threshold calibration"
 RAG_LOW_THRESHOLD=0.68       # "doubtful" line, chosen in Phase 4c, see §6 "Three retrieval zones"
 MAX_RETRIEVAL_RETRIES=2
+TOOL_BACKEND=mcp             # mcp = MCP servers (Phase 6b); local = shop/ in-process (tests)
 ```
 
 Provide `.env.example` with the same keys and empty values.
@@ -389,6 +390,14 @@ Connect with `langchain-mcp-adapters` (`MultiServerMCPClient`). The agent wraps 
 
 Handle async correctly inside Streamlit (e.g. a dedicated event loop / `asyncio.run` per request — choose the simplest approach that works reliably and explain it).
 
+### As built (Phase 6b)
+
+- `mcp_servers/orders_server.py` also exposes two **read-only** helpers, `order_summary` and `cancel_preview`. `prepare_action` / `execute_action` use them for the confirmation summary and its re-check, so prices in the summary come through the tool layer too. They are never bound to an LLM.
+- **What the LLM sees** is still defined in `agent/tools.py` (`@tool` names, docstrings, args — unchanged since Phase 3). Each wrapper adds `customer_id` from the runtime config and forwards the call to a backend. The server-side schemas (with `customer_id`) are never shown to the LLM.
+- **Backends** (`TOOL_BACKEND` in `.env`): `mcp` (default) → MCP servers; `local` → `shop/` in-process. Unit/graph tests use `local`; `tests/test_mcp.py` starts the real servers on a temp DB (`SHOP_DB_PATH`) and checks that both backends return identical results and leave identical databases.
+- **Async:** `agent/mcp_client.py` runs **one background thread with one asyncio event loop per process**. Both stdio sessions (`MultiServerMCPClient.session()` + `load_mcp_tools()`) are opened there once and kept open; sync code submits each call with `asyncio.run_coroutine_threadsafe`. Rejected alternative: `asyncio.run` per request would restart both server processes for every tool call and cannot reuse a session across event loops. In Streamlit the toolbox is created once per server process (started from the cached `get_agent()`).
+- `place_order` / `cancel_order` are listed by the orders server like any tool, but the agent calls them only from `execute_action` after `interrupt()` returned `"approve"`; no LLM tool group contains them.
+
 ---
 
 ## 12. Security & quality requirements
@@ -430,7 +439,8 @@ texnobozor-ai/
 │   └── retriever.py
 ├── agent/
 │   ├── llm.py                # Gemini chat + embeddings factory
-│   ├── tools.py              # LangChain @tool wrappers
+│   ├── tools.py              # LangChain @tool wrappers (what the LLM sees) + backend choice
+│   ├── mcp_client.py         # MCP sessions on a background event loop (Phase 6b)
 │   ├── state.py
 │   ├── prompts.py
 │   ├── nodes.py
@@ -443,7 +453,8 @@ texnobozor-ai/
 └── tests/
     ├── eval_questions.json
     ├── run_eval.py
-    └── test_tools.py         # pytest unit tests for shop/ logic
+    ├── test_tools.py         # pytest unit tests for shop/ logic
+    └── test_mcp.py           # MCP servers give the same results as in-process tools
 ```
 
 ---

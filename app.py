@@ -23,6 +23,7 @@ from langchain_core.exceptions import (ModelAuthenticationError, ModelConnection
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
+from agent import tools
 from agent.graph import build_graph, pending_confirmation, run_config
 from agent.nodes import APPROVE, REJECT, format_uzs
 from config import MissingSettingError
@@ -40,6 +41,9 @@ SIDEBAR_ORDERS = 10
 def get_agent():
     """Built once per server, not on every re-run. Its MemorySaver keeps every
     conversation; thread_id keeps different browser sessions apart."""
+    # Start the MCP servers now (once per process), not on the first customer question.
+    # They run on their own background event loop, so Streamlit code stays sync.
+    tools.backend()
     return build_graph()
 
 

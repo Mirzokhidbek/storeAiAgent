@@ -18,3 +18,7 @@ langgraph==1.2.24
 
 # Phase 5: UI
 streamlit==1.67.0
+
+# Phase 6b: MCP
+mcp==1.30.0
+langchain-mcp-adapters==0.3.2

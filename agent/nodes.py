@@ -17,9 +17,9 @@ from agent.prompts import (ACTION_PROMPT, CART_CHANGED, CART_PROMPT, CHITCHAT_PR
                            PRODUCT_SEARCH_PROMPT, REJECTED_MESSAGES, RESPOND_PROMPT,
                            REWRITE_PROMPT, ROUTER_PROMPT)
 from agent.state import Intent, ShopState
+from agent import tools
 from agent.tools import CART_TOOLS, CATALOG_TOOLS, CONFIRM_REQUIRED_TOOLS, ORDER_READ_TOOLS
 from rag.retriever import search_policies
-from shop import orders
 
 # How much history each LLM call sees. Protects the context window (and the quota).
 ROUTER_HISTORY = 6     # a few messages are enough to resolve "uning narxi qancha?"
@@ -308,10 +308,10 @@ def prepare_action(state: ShopState) -> dict:
     # Read-only check first. Its name goes into context, so the debug line shows that
     # place_order / cancel_order themselves did NOT run.
     if request.action == "place_order":
-        args, check_name, check = {}, "order_summary", orders.order_summary(customer_id)
+        args, check_name, check = {}, "order_summary", tools.order_summary(customer_id)
     else:
         args, check_name = {"order_id": request.order_id}, "cancel_preview"
-        check = (orders.cancel_preview(customer_id, request.order_id)
+        check = (tools.cancel_preview(customer_id, request.order_id)
                  if request.order_id else NO_ORDER_ID)
 
     if "error" in check:
@@ -349,7 +349,7 @@ def confirm_action(state: ShopState) -> dict:
 def _cart_changed(state: ShopState, pending: dict) -> bool:
     """The customer approved one summary; the order must be created from exactly that.
     Matters in Phase 6, when time passes between the question and the click."""
-    return orders.order_summary(state.get("customer_id")) != pending["snapshot"]
+    return tools.order_summary(state.get("customer_id")) != pending["snapshot"]
 
 
 def execute_action(state: ShopState, config: RunnableConfig) -> dict:
