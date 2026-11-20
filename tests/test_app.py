@@ -6,9 +6,11 @@ make_confirm function app.py uses, so we test the pause -> click -> resume flow.
 """
 
 import pytest
+import streamlit as st
 from langchain_core.exceptions import ModelInvalidRequestError, ModelRateLimitError
 from langchain_core.messages import AIMessage, HumanMessage
 
+import agent.graph
 import app
 from agent import nodes
 from agent.graph import build_graph, run_config
@@ -16,6 +18,7 @@ from agent.prompts import REJECTED_MESSAGES
 from config import MissingSettingError
 from shop import customers, orders
 from tests.test_actions import db_snapshot, fake  # noqa: F401 — `fake` is a fixture
+from tests.test_graph import FakeLLM
 
 
 # ======================= login =======================
@@ -122,3 +125,78 @@ def test_approval_of_an_old_summary_does_not_order_a_changed_cart(fake):
 
     assert asked_again.value.summary != summary
     assert len(orders.list_my_orders("C-001")["orders"]) == count
+
+
+# ======================= switching customers =======================
+# Runs the real app.py with Streamlit's AppTest (no browser): it clicks and types
+# like a user. Only the LLMs are fakes.
+
+SECRET = "Mening manzilim Chilonzor 5-uy"
+
+
+@pytest.fixture
+def ui(fake, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    chat_llm = FakeLLM()
+    monkeypatch.setattr(nodes, "_chat_llm", lambda: chat_llm)
+    # AppTest runs app.py as its own module, so app.get_agent() here would be a different
+    # cache. Give both sides ONE graph, so the test can look into the app's memory.
+    graph = build_graph()
+    monkeypatch.setattr(agent.graph, "build_graph", lambda: graph)
+    st.cache_resource.clear()        # forget graphs cached by earlier tests
+    at = AppTest.from_file(app.__file__, default_timeout=10)
+    at.run()
+    return at, chat_llm, graph
+
+
+def login(at, phone: str) -> None:
+    at.sidebar.text_input[0].input(phone)
+    at.sidebar.button[0].click().run()     # the form's "Kirish" button
+
+
+def say(at, fake, chat_llm, text: str) -> None:
+    fake["router"].replies.append(nodes.RouteDecision(intent="chitchat"))
+    chat_llm.replies.append(AIMessage("Tushunarli!"))
+    at.chat_input[0].set_value(text).run()
+
+
+def thread_texts(graph, thread_id: str) -> str:
+    state = graph.get_state({"configurable": {"thread_id": thread_id}})
+    return " ".join(m.content for m in state.values.get("messages", []))
+
+
+def test_next_customer_cannot_see_previous_chat(ui, fake):
+    at, chat_llm, graph = ui
+    login(at, "+998901234567")                        # C-001
+    say(at, fake, chat_llm, SECRET)
+    c001_thread = at.session_state["thread_id"]
+    assert SECRET in thread_texts(graph, c001_thread)        # control: it really was remembered
+
+    at.sidebar.button[0].click().run()                # "Chiqish"
+    login(at, "+998912345678")                        # C-002
+    say(at, fake, chat_llm, "Mening manzilim qayerda edi?")
+
+    assert at.session_state["customer_id"] == "C-002"
+    assert at.session_state["thread_id"] != c001_thread
+    # 1) the graph memory of the new thread has nothing from C-001
+    assert SECRET not in thread_texts(graph, at.session_state["thread_id"])
+    # 2) the LLM answering C-002 was not shown C-001's message
+    assert SECRET not in " ".join(m.content for m in chat_llm.calls[-1])
+    # 3) the old thread is deleted from the server's memory, not just abandoned
+    assert thread_texts(graph, c001_thread) == ""
+    # 4) the screen shows no old messages either
+    assert all(SECRET not in m["content"] for m in at.session_state["messages"])
+
+
+def test_logout_clears_chat_and_memory(ui, fake):
+    at, chat_llm, graph = ui
+    login(at, "+998901234567")
+    say(at, fake, chat_llm, SECRET)
+    old_thread = at.session_state["thread_id"]
+
+    at.sidebar.button[0].click().run()                # "Chiqish"
+
+    assert at.session_state["customer_id"] is None
+    assert at.session_state["thread_id"] != old_thread
+    assert thread_texts(graph, old_thread) == ""
+    assert [m["content"] for m in at.session_state["messages"]] == [app.GREETING]

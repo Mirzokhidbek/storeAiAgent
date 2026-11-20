@@ -361,6 +361,12 @@ Rule 7 changed in Phase 2: the `respond` node appends "Manba: ..." from chunk me
 
 `st.session_state` holds: `thread_id`, `customer_id`, `messages` for display.
 
+**Switching customers (privacy rule)**
+- On **logout** and on every **login**, start a new conversation: a new random `thread_id`, the display `messages` reset to the greeting, any pending confirmation dropped.
+- Also **delete the old thread from the checkpointer** (`checkpointer.delete_thread(old_thread_id)`), not just abandon it.
+- Why: the LLM's memory is the checkpointer state for a `thread_id`. If the next customer kept the same thread, the agent would see the previous customer's messages (address, orders, cart) and could repeat them.
+- Test (`tests/test_app.py`): C-001 chats, logs out, C-002 logs in and chats → the new thread's graph memory, the LLM's input for C-002 and the screen contain nothing from C-001, and the old thread is empty.
+
 ---
 
 ## 11. MCP (Phase 6)

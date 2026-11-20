@@ -131,8 +131,13 @@ def init_session() -> None:
 
 
 def reset_conversation() -> None:
-    """New customer = new thread: nobody sees the previous customer's chat."""
+    """Called on login and logout. The next customer must not inherit anything:
+    a new thread_id gives the LLM an empty memory, and the old thread is deleted
+    from the checkpointer, so the previous chat is gone from the server too."""
     ss = st.session_state
+    old_thread = ss.get("thread_id")
+    if old_thread:
+        get_agent().checkpointer.delete_thread(old_thread)
     ss.thread_id = uuid.uuid4().hex
     ss.messages = [{"role": "assistant", "content": GREETING, "sources": []}]
     ss.pending_summary, ss.decision = None, None
