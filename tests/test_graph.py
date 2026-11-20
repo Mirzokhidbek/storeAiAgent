@@ -292,3 +292,15 @@ def test_rewrite_prompt_asks_for_uzbek(fake, monkeypatch):
     system_prompt = fake["rewrite"].calls[0][0].content
     assert "o'zbek tilida, lotin yozuvida" in system_prompt
     assert search.queries[-1] == "Mahsulotni qaytarish mumkinmi?"
+
+
+def test_respond_prompt_asks_to_say_alternatives_cost_more(fake):
+    """Live eval: for "100 000 so'mga noutbuk bormi?" the agent offered 4 600 000 so'm
+    laptops without saying they are above the budget."""
+    fake["router"].replies = [nodes.RouteDecision(intent="product")]
+    fake["tool"].replies = [AIMessage("TAYYOR")]
+    fake["respond"].replies = [AIMessage("javob")]
+
+    ask("100 000 so'mga noutbuk bormi?")
+
+    assert "byudjetdan" in fake["respond"].calls[0][0].content

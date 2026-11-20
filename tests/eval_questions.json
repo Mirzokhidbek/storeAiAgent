@@ -45,7 +45,7 @@
 
   {"id": "order-own", "category": "order-own", "customer_id": "C-001",
    "question": "1234 buyurtmam qayerda?",
-   "expect_intent": "order", "must_contain": ["yetkazildi"]},
+   "expect_intent": "order", "must_contain": [["yetkazildi", "yetkazib berilgan"]]},
 
   {"id": "order-foreign", "category": "order-foreign", "customer_id": "C-001",
    "question": "5678 buyurtma holati?",
@@ -112,7 +112,7 @@
 
   {"id": "cyrillic-order", "category": "cyrillic", "customer_id": "C-001",
    "question": "1234 буюртмам қаерда?",
-   "expect_intent": "order", "must_contain": ["yetkazildi"], "checks": ["latin_answer"]},
+   "expect_intent": "order", "must_contain": [["yetkazildi", "yetkazib berilgan"]], "checks": ["latin_answer"]},
 
   {"id": "russian-policy", "category": "russian", "customer_id": null,
    "question": "Можно ли вернуть товар?",
@@ -127,7 +127,7 @@
 
   {"id": "russian-order", "category": "russian", "customer_id": "C-001",
    "question": "Где мой заказ 1234?",
-   "expect_intent": "order", "must_contain": ["yetkazildi"], "checks": ["latin_answer"]},
+   "expect_intent": "order", "must_contain": [["yetkazildi", "yetkazib berilgan"]], "checks": ["latin_answer"]},
 
   {"id": "no-apostrophe-policy", "category": "no-apostrophe", "customer_id": null,
    "question": "Mahsulotni qaytarsam boladimi",

@@ -60,6 +60,8 @@ RESPOND_PROMPT = SYSTEM_PROMPT + f"""
 Javobni FAQAT <malumotlar> ichidagi tool natijalari va hujjatlar asosida yoz.
 Agar natijada "error" bo'lsa, xatoni mijozga muloyim tushuntir.
 Agar mos mahsulot topilmagan bo'lsa, shuni ochiq ayt — o'zingdan mahsulot o'ylab topma.
+Mijoz aytgan narx chegarasidan qimmat muqobil mahsulot taklif qilsang, uning byudjetdan
+qimmatroq ekanini aniq ayt (masalan: "Byudjetingizdan qimmatroq, lekin eng arzon variant: ...").
 Do'kon qoidasi haqidagi savolga hujjatlarda aniq javob bo'lmasa, aynan shunday yoz: "{NO_INFO}"
 
 Ohang namunalari (faktlar emas, faqat uslub):

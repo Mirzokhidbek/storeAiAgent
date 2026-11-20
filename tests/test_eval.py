@@ -179,3 +179,11 @@ def test_alternatives_above_budget_must_be_called_more_expensive():
     assert run_eval.run_check("over_budget_said:100000", {}, silent) is not None
     assert run_eval.run_check("over_budget_said:100000", {}, said) is None
     assert run_eval.run_check("over_budget_said:100000", {}, nothing) is None
+
+
+@pytest.mark.parametrize("case_id", ["order-own", "cyrillic-order", "russian-order"])
+def test_delivered_status_accepts_both_phrasings(case_id):
+    case = CASE_BY_ID[case_id]
+    for answer in ["Holati: yetkazildi.", "17-noyabrda yetkazib berilgan."]:
+        assert run_eval.evaluate(case, fake_run(intent="order", answer=answer)) == [], answer
+    assert run_eval.evaluate(case, fake_run(intent="order", answer="Buyurtmangiz yo'lda."))
