@@ -47,6 +47,7 @@ python data/seed_data.py        # create shop.db with fake data
 python rag/ingest.py            # load policies + product descriptions into Chroma
 python ask_policy.py "Mahsulotni qaytarsam bo'ladimi?"   # Phase 2: policy Q&A from the terminal
 python -m pytest -v             # Phase 3: unit tests for catalog/order tools (no API key needed)
+python chat.py                  # Phase 4: chat with the agent in the terminal (test customer C-001)
 python -m tests.run_eval        # run evaluation questions
 streamlit run app.py            # start the UI
 ```
