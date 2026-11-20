@@ -1,6 +1,8 @@
 """SQLite helpers. The database is the single source of truth for prices, stock and orders."""
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "shop.db"
@@ -48,9 +50,13 @@ CREATE TABLE cart_items (
 """
 
 
-def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
-    """Open a connection where rows behave like dicts and foreign keys are enforced."""
-    conn = sqlite3.connect(db_path)
+def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
+    """Open a connection where rows behave like dicts and foreign keys are enforced.
+
+    DB_PATH is read at call time (not as a default argument) so tests can point it
+    at a temporary copy and never touch the real shop.db.
+    """
+    conn = sqlite3.connect(db_path or DB_PATH)
     conn.row_factory = sqlite3.Row  # lets us read row["price_uzs"] instead of row[4]
     conn.execute("PRAGMA foreign_keys = ON")  # SQLite turns this off by default
     return conn
@@ -58,3 +64,17 @@ def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
 
 def create_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+
+
+@contextmanager
+def connect() -> Iterator[sqlite3.Connection]:
+    """`with connect() as conn:` -> commit if the block succeeds, roll back if it fails,
+    and always close the connection. Multi-step writes (e.g. place_order) are all-or-nothing.
+
+    (A plain `with sqlite3.connect(...)` commits but does NOT close the connection.)"""
+    conn = get_connection()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()

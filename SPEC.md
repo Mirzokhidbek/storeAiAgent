@@ -212,9 +212,11 @@ Every tool has a clear docstring (the LLM reads it to decide when to call the to
 
 | Tool | Args | Behaviour |
 |---|---|---|
-| `search_products` | `query: str`, `category?: str`, `min_price?: int`, `max_price?: int`, `brand?: str`, `in_stock_only: bool = True`, `limit: int = 3` | **Hybrid search:** semantic search in the `products` collection with metadata filters (category, brand, price range); then re-read price/stock from SQLite and drop out-of-stock items if `in_stock_only`. Return top `limit`. |
+| `search_products` | `query: str`, `category?: str`, `min_price?: int`, `max_price?: int`, `brand?: str`, `in_stock_only: bool = True`, `limit: int = 3` | **Hybrid search:** semantic search in the `products` collection with metadata filters on **category and brand only**; then re-read the candidates from SQLite, apply the price range there, and drop out-of-stock items if `in_stock_only`. Return top `limit` in semantic order. |
 | `get_product` | `product_id: str` | Full product row from SQLite with parsed specs. |
 | `compare_products` | `product_ids: list[str]` (2–3) | Side-by-side fields: name, price, weight, key specs, stock. |
+
+**Rule: never filter by price in Chroma.** `price_uzs` in Chroma metadata is a copy made at ingest time. If a price drops in SQLite (a discount) but Chroma still holds the old, higher price, a Chroma price filter would hide the discounted product completely. So Chroma filters only on fields that do not change (category, brand) and only decides the **order**; price and stock are filtered in SQL, which holds the current values. Because SQL may drop many candidates, the semantic step asks for enough candidates to cover the whole catalog (`SEMANTIC_CANDIDATES = 50` for ~40 products).
 
 ### Order tools
 
@@ -227,7 +229,7 @@ Every tool has a clear docstring (the LLM reads it to decide when to call the to
 | `view_cart` | — | Items, quantities, current prices, total. | read |
 | `add_to_cart` | `product_id: str`, `quantity: int = 1` | Validate stock. Return updated cart. | write |
 | `place_order` | — | Create order from cart (status `yangi`), decrease stock, clear cart. **Requires confirmation.** | high |
-| `cancel_order` | `order_id: str` | Only if owned by customer and status is `yangi` or `tolandi`. **Requires confirmation.** | high |
+| `cancel_order` | `order_id: str` | Only if owned by customer and status is `yangi` or `tolandi`. Sets status `bekor_qilindi` and returns the order's items to stock (mirror of `place_order`). **Requires confirmation.** | high |
 
 If no customer is logged in, order tools return an error asking the user to log in (UI sidebar).
 
